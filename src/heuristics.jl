@@ -5,7 +5,7 @@ function prod_eigs(Csub,t::Int)
     return sum(log, @view λ[1:t])
 end
 
-function init_heur_soln(C::Symmetric{<:Real,<:AbstractMatrix},s::Int,t::Int, type_init::Symbol)
+function init_heur_soln(C::Symmetric{<:Real,<:AbstractMatrix},s::Int,t::Int, type_init::Symbol; atol=1e-10)
     n = size(C,1);
     if type_init == :Cont
         λ,U = eigen(C);
@@ -47,7 +47,19 @@ function init_heur_soln(C::Symmetric{<:Real,<:AbstractMatrix},s::Int,t::Int, typ
                 end
             end
             deleteat!(S, best_pos)
-        end        
+        end
+    elseif type_init == :Simplex
+        # Choose ψ < λ_min(C)
+        psi = eigmin(C) - atol
+
+        # Compute A(ψ)
+        At = compute_At(Matrix(C), psi)
+
+        # Compute squared norm of each column
+        col_norms = vec(sum(abs2, At; dims = 1))
+
+        # Get indices of the s largest norms
+        S = partialsortperm(col_norms, 1:s; rev = true)
     else
         error("Unknown type_init = $(type_init)")
     end
@@ -119,7 +131,7 @@ function run_all_LS(C::Symmetric{<:Real,<:AbstractMatrix},s::Int,t::Int)
     n = size(C,1);
 
     x_ls = zeros(n); z_ls = -Inf;
-    for init_strategy in [:Cont,:Greedy,:ReverseGreedy]
+    for init_strategy in [:Cont,:Greedy,:ReverseGreedy,:Simplex]
         arr_init = init_heur_soln(C,s,t, init_strategy)
         for ls_strategy in [:FI,:FP,:BI]
             x_temp,z_temp =  runLS(C,n,s,t,ls_strategy;arr_init = copy(arr_init));

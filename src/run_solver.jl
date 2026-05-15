@@ -7,13 +7,14 @@ using JuMP
 using Ipopt
 using KNITRO
 
+include("util.jl")
 include("heuristics.jl")
 include("solver_ipopt.jl")
 
 # -------------------------
 # Problem data
 # -------------------------
-n = 124
+n = 63
 s = 20
 t_vals = [i for i in 1:s]
 
@@ -23,6 +24,8 @@ close(matfile)
 
 C = Matrix{Float64}(C)
 Csym = Symmetric(C)
+
+atol = 1e-10
 
 # -------------------------
 # Data Collection
@@ -48,7 +51,7 @@ for t in t_vals
             Csym,
             s,
             t;
-            atol = tol,
+            atol = atol,
         )
     end
 
@@ -61,7 +64,7 @@ for t in t_vals
             Csym,
             s,
             t;
-            atol = tol,
+            atol = atol,
         )
     end
 
@@ -73,7 +76,7 @@ for t in t_vals
     # -------------------------
     # Spectral bound
     # -------------------------
-    z_spec = spectral_bound(Csym, t)
+    z_spec = spectral_bound_solver(Csym, t)
 
     append!(
         result,

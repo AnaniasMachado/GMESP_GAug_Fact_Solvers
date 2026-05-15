@@ -1,4 +1,4 @@
-function spectral_bound(C::Symmetric{<:Real,<:AbstractMatrix},t::Integer)
+function spectral_bound_solver(C::Symmetric{<:Real,<:AbstractMatrix},t::Integer)
     λ = reverse(eigvals(C))
     return sum(log, @view λ[1:t])
 end
