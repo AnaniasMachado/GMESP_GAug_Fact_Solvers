@@ -10,7 +10,7 @@ import MathOptInterface as MOI
 
 include("util.jl")
 include("heuristics.jl")
-include("solver_ipopt.jl")
+include("solver_knitro.jl")
 
 # -------------------------
 # Problem data
@@ -32,18 +32,9 @@ atol = 1e-10
 psi = eigmin(Csym) - atol
 
 # -------------------------
-# Calibration parameters
-# -------------------------
-max_calib_iter = 50
-alpha0 = 1e-3
-rho = 1e4
-margin = 1e-5
-tau = 1e-5
-
-# -------------------------
 # Data Collection
 # -------------------------
-solver = "ipopt"
+solver = "knitro"
 df = DataFrame()
 results_filepath = "results/results_gap_$(solver)_n$(n)_kappa$(kappa).csv"
 results = []
@@ -84,26 +75,6 @@ for s in s_vals
     end
 
     # -------------------------
-    # DDGFact+_Upsilon, calibrated generalized scaling
-    # -------------------------
-    runtime_ddgfact_plus_upsilon = @elapsed begin
-        gamma_upsilon, x_ddgfact_plus_upsilon, y_ddgfact_plus_upsilon, z_ddgfact_plus_upsilon =
-            calibrate_gamma_ddfactplus_upsilon_penalty(
-                Csym,
-                s,
-                t,
-                psi;
-                atol = atol,
-                max_calib_iter = max_calib_iter,
-                alpha0 = alpha0,
-                rho = rho,
-                margin = margin,
-                tau = tau,
-                verbose = false,
-            )
-    end
-
-    # -------------------------
     # Local search
     # -------------------------
     x_ls, z_ls = run_all_LS(Csym, s, t)
@@ -118,11 +89,9 @@ for s in s_vals
         [
             z_ddgfact - z_ls,
             z_ddgfact_plus - z_ls,
-            z_ddgfact_plus_upsilon - z_ls,
             z_spec - z_ls,
             runtime_ddgfact,
             runtime_ddgfact_plus,
-            runtime_ddgfact_plus_upsilon,
         ],
     )
 
@@ -137,11 +106,9 @@ cols = [
     :t,
     :ddgfact_gap,
     :ddgfact_plus_gap,
-    :ddgfact_plus_upsilon_gap,
     :spec_gap,
     :ddgfact_runtime,
     :ddgfact_plus_runtime,
-    :ddgfact_plus_upsilon_runtime,
 ]
 
 df = DataFrame(results_matrix, cols)

@@ -1,11 +1,18 @@
-function spectral_bound_solver(C::Symmetric{<:Real,<:AbstractMatrix},t::Integer)
+function spectral_bound_solver(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    t::Integer
+)
     λ = reverse(eigvals(C))
     return sum(log, @view λ[1:t])
 end
 
-function factorize_matrix(C::Symmetric{<:Real,<:AbstractMatrix}; atol=1e-8, ta = 0)
-    ta = max(0,ta);          
-    λ,Q = eigen(C - ta*I);
+function factorize_matrix(
+    C::Symmetric{<:Real,<:AbstractMatrix};
+    atol=1e-8,
+    psi = 0
+)
+    psi = max(0,psi);          
+    λ,Q = eigen(C - psi*I);
     perm = length(λ):-1:1           # permutation for descending order
     λ = λ[perm];
     Q = Q[:, perm];
@@ -15,7 +22,12 @@ function factorize_matrix(C::Symmetric{<:Real,<:AbstractMatrix}; atol=1e-8, ta =
     return F
 end
 
-function find_iota(λ::Vector{Float64}, t::Int64; atol=1e-8,check::Bool = false)
+function find_iota(
+    λ::Vector{Float64},
+    t::Int64;
+    atol=1e-5,
+    check::Bool = false
+)
     # check if λ satisfies conditions
     k = length(λ)
     if check
@@ -50,7 +62,12 @@ function add_ipopt_options!(model)
 end
 
 
-function ddfact_gmesp(C::Symmetric{<:Real,<:AbstractMatrix},s::Integer,t::Integer; atol = 1e-10)
+function ddfact_gmesp(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    s::Integer,
+    t::Integer;
+    atol = 1e-10
+)
     n = size(C,1);
     Fg = factorize_matrix(C);
     model = Model(Ipopt.Optimizer);
@@ -94,11 +111,16 @@ function ddfact_gmesp(C::Symmetric{<:Real,<:AbstractMatrix},s::Integer,t::Intege
     return x,obj_val
 end
 
-function aug_ddfact_gmesp(C::Symmetric{<:Real,<:AbstractMatrix},s::Integer,t::Integer; atol = 1e-10)
+function aug_ddfact_gmesp(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    s::Integer,
+    t::Integer,
+    psi::Float64;
+    atol = 1e-10
+)
     n = size(C,1);
     I_t = zeros(n); I_t[1:t] .= 1;
-    ta = eigmin(C)-atol;
-    Fg = factorize_matrix(C;ta=ta);
+    Fg = factorize_matrix(C;psi=psi);
     model = Model(Ipopt.Optimizer)
     add_ipopt_options!(model)
     set_silent(model)
@@ -110,7 +132,7 @@ function aug_ddfact_gmesp(C::Symmetric{<:Real,<:AbstractMatrix},s::Integer,t::In
         # eigendecomposition of X
         λ, U_eig = eigen(X);
         perm = length(λ):-1:1           # permutation for descending order
-        λ = λ[perm] + ta*I_t;
+        λ = λ[perm] + psi*I_t;
         U_eig = U_eig[:, perm];
         # compute iota
         iota, mid_val = find_iota(λ,t);
@@ -138,4 +160,84 @@ function aug_ddfact_gmesp(C::Symmetric{<:Real,<:AbstractMatrix},s::Integer,t::In
     obj_val = objective_value(model)
     x = value.(x);
     return x,obj_val
+end
+
+function aug_ddfact_upsilon_gmesp(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    s::Integer,
+    t::Integer,
+    psi::Float64;
+    atol = 1e-10,
+)
+    n = size(C, 1)
+    @assert length(gamma) == n
+    @assert all(gamma .> 0)
+    @assert 1 <= t <= s <= n
+    log_gamma = log.(gamma)
+    Fg = scaled_factorize_matrix(
+        C,
+        gamma,
+        psi;
+        atol = atol,
+    )
+    I_t = zeros(n)
+    I_t[1:t] .= 1.0
+    model = Model(Ipopt.Optimizer)
+    add_ipopt_options!(model)
+    set_silent(model)
+    @variable(model, atol <= x[i = 1:n] <= 1 - atol)
+    @variable(model, atol <= y[i = 1:n] <= 1 - atol)
+
+    function aug_gamma_upsilon_bound_gmesp_f(x...)
+        x = collect(x)
+        X = Fg' * diagm(x) * Fg
+        X = Symmetric(0.5 * (X + X'))
+        # eigendecomposition of X
+        λ, U_eig = eigen(X)
+        perm = length(λ):-1:1
+        λ = λ[perm] + psi * I_t
+        U_eig = U_eig[:, perm]
+        # compute iota
+        iota, mid_val = find_iota(λ, t)
+        # objective function value
+        iota == 0 ? fval = 0.0 : fval = sum(log, @view λ[1:iota])
+        fval += (t - iota) * log(mid_val)
+        # auxiliary variable for supgradient
+        eigDual = zeros(n)
+        if iota > 0
+            eigDual[1:iota] = 1.0 ./ λ[1:iota]
+        end
+        eigDual[iota+1:end] .= 1.0 / mid_val
+        # compute supgradient dx
+        K1 = Fg * U_eig
+        global dx = vec(sum(K1 .^ 2 .* eigDual', dims = 2))
+        return fval
+    end
+    function aug_gamma_upsilon_bound_gmesp_∇f(g, x...)
+        for i = 1:n
+            g[i] = dx[i]
+        end
+    end
+    register(
+        model,
+        :aug_gamma_upsilon_bound,
+        n,
+        aug_gamma_upsilon_bound_gmesp_f,
+        aug_gamma_upsilon_bound_gmesp_∇f,
+    )
+    @NLobjective(
+        model,
+        Max,
+        aug_gamma_upsilon_bound(x...) -
+        sum(log_gamma[i] * y[i] for i in 1:n)
+    )
+    @constraint(model, sum(x) == s)
+    @constraint(model, sum(y) == t)
+    @constraint(model, [i = 1:n], y[i] <= x[i])
+    optimize!(model)
+    obj_val = objective_value(model)
+    x_val = value.(x)
+    y_val = value.(y)
+    return x_val, y_val, obj_val
 end
