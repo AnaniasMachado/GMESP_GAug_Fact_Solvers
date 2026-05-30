@@ -52,6 +52,149 @@ end
 
 
 # ============================================================
+# Auxiliary t = 1 denominator
+# ============================================================
+function gamma_t1_denominator(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    x::Vector{Float64},
+    psi::Float64,
+    s::Int;
+    atol::Float64 = 1e-8,
+)
+    n = size(C, 1)
+
+    @assert length(gamma) == n
+    @assert length(x) == n
+    @assert all(gamma .> 0)
+
+    cdiag = diag(C)
+
+    denom = dot(x, gamma .* cdiag) - psi * (s - 1)
+
+    if denom <= atol
+        error("Invalid t=1 logarithm denominator: denom = $denom")
+    end
+
+    return denom
+end
+
+
+# ============================================================
+# t = 1 gradient with respect to gamma
+# ============================================================
+function gamma_calibration_gradient_t1(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    x::Vector{Float64},
+    y::Vector{Float64},
+    psi::Float64,
+    s::Int;
+    atol::Float64 = 1e-8,
+)
+    n = size(C, 1)
+
+    @assert length(gamma) == n
+    @assert length(x) == n
+    @assert length(y) == n
+    @assert all(gamma .> 0)
+
+    cdiag = diag(C)
+    denom = gamma_t1_denominator(C, gamma, x, psi, s; atol = atol)
+
+    return x .* cdiag ./ denom .- y ./ gamma
+end
+
+
+# ============================================================
+# t = 1 gradient with respect to theta = log(gamma)
+# ============================================================
+function theta_calibration_gradient_t1(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    x::Vector{Float64},
+    y::Vector{Float64},
+    psi::Float64,
+    s::Int;
+    atol::Float64 = 1e-8,
+)
+    n = size(C, 1)
+
+    @assert length(gamma) == n
+    @assert length(x) == n
+    @assert length(y) == n
+    @assert all(gamma .> 0)
+
+    cdiag = diag(C)
+    denom = gamma_t1_denominator(C, gamma, x, psi, s; atol = atol)
+
+    return x .* gamma .* cdiag ./ denom .- y
+end
+
+
+# ============================================================
+# t = 1 derivative with respect to psi
+# ============================================================
+function gamma_t1_dGamma_dpsi(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    x::Vector{Float64},
+    psi::Float64,
+    s::Int;
+    atol::Float64 = 1e-8,
+)
+    denom = gamma_t1_denominator(C, gamma, x, psi, s; atol = atol)
+
+    return (1.0 - s) / denom
+end
+
+
+# ============================================================
+# t = 1 gradient with respect to theta = log(gamma),
+# including psi(theta) chain rule
+# ============================================================
+function theta_calibration_gradient_t1_with_psi_chain(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    x::Vector{Float64},
+    y::Vector{Float64},
+    psi::Float64,
+    s::Int,
+    dpsi_dtheta::Vector{Float64};
+    atol::Float64 = 1e-8,
+)
+    n = size(C, 1)
+
+    @assert length(gamma) == n
+    @assert length(x) == n
+    @assert length(y) == n
+    @assert length(dpsi_dtheta) == n
+    @assert all(gamma .> 0)
+
+    g_fixed = theta_calibration_gradient_t1(
+        C,
+        gamma,
+        x,
+        y,
+        psi,
+        s;
+        atol = atol,
+    )
+
+    dGamma_dpsi = gamma_t1_dGamma_dpsi(
+        C,
+        gamma,
+        x,
+        psi,
+        s;
+        atol = atol,
+    )
+
+    return g_fixed .+ dGamma_dpsi .* dpsi_dtheta
+end
+
+
+# ============================================================
 # Subgradient with respect to gamma
 # ============================================================
 function gamma_calibration_subgradient(
@@ -60,35 +203,64 @@ function gamma_calibration_subgradient(
     x::Vector{Float64},
     y::Vector{Float64},
     psi::Float64,
+    s::Int,
     t::Int;
     atol = 1e-8,
 )
     n = size(C, 1)
+
     @assert length(gamma) == n
     @assert length(x) == n
     @assert length(y) == n
     @assert all(gamma .> 0)
+    @assert 1 <= t <= s <= n
+
+    if t == 1
+        return gamma_calibration_gradient_t1(
+            C,
+            gamma,
+            x,
+            y,
+            psi,
+            s;
+            atol = atol,
+        )
+    end
+
     Cgamma = scaled_matrix(C, gamma)
+
     sqrtx = sqrt.(max.(x, 0.0))
     Xsqrt = Diagonal(sqrtx)
+
     Mtilde = Xsqrt * (Cgamma - psi * I) * Xsqrt
     Mtilde = Symmetric(0.5 * (Mtilde + Mtilde'))
+
     λ, Q = eigen(Mtilde)
+
     perm = length(λ):-1:1
     λ = λ[perm]
     Q = Q[:, perm]
+
     I_t = zeros(n)
     I_t[1:t] .= 1.0
+
     λshift = λ + psi * I_t
+
     iota, mid_val = find_iota(λshift, t)
+
     eigDual = zeros(n)
+
     if iota > 0
         eigDual[1:iota] .= 1.0 ./ λshift[1:iota]
     end
+
     eigDual[iota+1:end] .= 1.0 / mid_val
+
     G = Q * Diagonal(eigDual) * Q'
     W = Xsqrt * G * Xsqrt
+
     g_gamma = (diag(Cgamma * W) .- y) ./ gamma
+
     return g_gamma
 end
 
@@ -102,10 +274,29 @@ function theta_calibration_subgradient(
     x::Vector{Float64},
     y::Vector{Float64},
     psi::Float64,
+    s::Int,
     t::Int;
     atol = 1e-8,
 )
     n = size(C, 1)
+
+    @assert length(gamma) == n
+    @assert length(x) == n
+    @assert length(y) == n
+    @assert all(gamma .> 0)
+    @assert 1 <= t <= s <= n
+
+    if t == 1
+        return theta_calibration_gradient_t1(
+            C,
+            gamma,
+            x,
+            y,
+            psi,
+            s;
+            atol = atol,
+        )
+    end
 
     Cgamma = scaled_matrix(C, gamma)
 
@@ -156,6 +347,7 @@ function theta_calibration_subgradient_with_psi_chain(
     x::Vector{Float64},
     y::Vector{Float64},
     psi::Float64,
+    s::Int,
     t::Int;
     atol::Float64 = 1e-8,
     psi_margin::Float64 = 1e-8,
@@ -167,7 +359,7 @@ function theta_calibration_subgradient_with_psi_chain(
     @assert length(x) == n
     @assert length(y) == n
     @assert all(gamma .> 0)
-    @assert 1 <= t <= n
+    @assert 1 <= t <= s <= n
 
     # ------------------------------------------------------------
     # C_gamma and eigenpair for lambda_min(C_gamma)
@@ -188,8 +380,21 @@ function theta_calibration_subgradient_with_psi_chain(
         dpsi_dtheta = zeros(n)
     end
 
+    if t == 1
+        return theta_calibration_gradient_t1_with_psi_chain(
+            C,
+            gamma,
+            x,
+            y,
+            psi,
+            s,
+            dpsi_dtheta;
+            atol = atol,
+        )
+    end
+
     # ------------------------------------------------------------
-    # Build Mtilde = Xsqrt * (Cgamma - psi I) * Xsqrt
+    # General t > 1 spectral subgradient
     # ------------------------------------------------------------
     sqrtx = sqrt.(max.(x, 0.0))
     Xsqrt = Diagonal(sqrtx)
@@ -204,9 +409,6 @@ function theta_calibration_subgradient_with_psi_chain(
     λ = λ[perm]
     Q = Q[:, perm]
 
-    # ------------------------------------------------------------
-    # Compute the subgradient a of phi_t at lambda + psi I_t
-    # ------------------------------------------------------------
     I_t = zeros(n)
     I_t[1:t] .= 1.0
 
@@ -334,6 +536,7 @@ function eval_ddfactplus_upsilon_calibration(
             x,
             y,
             psi,
+            s,
             t;
             atol = atol,
             psi_margin = psi_margin,
@@ -350,6 +553,7 @@ function eval_ddfactplus_upsilon_calibration(
             x,
             y,
             psi,
+            s,
             t;
             atol = atol,
         )

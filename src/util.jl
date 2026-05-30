@@ -1,93 +1,132 @@
-using LinearAlgebra, Arpack
+using LinearAlgebra
+using Arpack
 
 # ============================================================
-# A(t_a) factorization
+# Compute F such that C - psi*I = F*F'
 # ============================================================
-function compute_At(C::Matrix{Float64}, t_a::Float64)
-    F = cholesky(Symmetric(C - t_a * I))
-    return F.U
+function compute_F(
+    C::AbstractMatrix{Float64};
+    psi::Float64 = 0.0,
+    atol::Float64 = 1e-8,
+)
+    psi = max(0.0, psi)
+
+    Cpsi = Symmetric(Matrix(C) - psi * I)
+    eig = eigen(Cpsi)
+
+    λ = eig.values
+    Q = eig.vectors
+
+    perm = sortperm(λ, rev = true)
+    λ = λ[perm]
+    Q = Q[:, perm]
+
+    if minimum(λ) < -atol
+        error("C - psi*I is not positive semidefinite. Minimum eigenvalue = $(minimum(λ)).")
+    end
+
+    λ = map(v -> abs(v) <= atol ? 0.0 : v, λ)
+
+    F = Q * Diagonal(sqrt.(λ))
+
+    return F
 end
 
-function compute_At(C::Symmetric{Float64, <:AbstractMatrix}, t_a::Float64)
-    F = cholesky(Symmetric(Matrix(C) - t_a * I))
-    return F.U
-end
+# ============================================================
+# M_psi(x) = F' * Diagonal(x) * F
+# ============================================================
+function M_psi(x::Vector{Float64}, F::AbstractMatrix{Float64})
+    if length(x) != size(F, 1)
+        error("Dimension mismatch: length(x) must equal the number of rows of F.")
+    end
 
-# ============================================================
-# M_{\psi}(x) = A(\psi) * Diagonal(x) * A(\psi)'
-# ============================================================
-function M_psi(x::Vector{Float64}, At::AbstractMatrix{Float64})
-    return At * (At' .* x)
+    return Symmetric(F' * (F .* reshape(x, :, 1)))
 end
 
 # ============================================================
 # Iota index for phi_t
+# Input y must be sorted in nonincreasing order
 # ============================================================
 function find_iota(
-    λ::Vector{Float64},
+    y::Vector{Float64},
     t::Int;
     atol::Float64 = 1e-10,
 )
-    tail_sum = sum(λ)
+    if t < 1 || t > length(y)
+        error("t must satisfy 1 <= t <= length(y).")
+    end
+
+    tail_sum = sum(y)
     mid = tail_sum / t
 
-    if mid >= λ[1] - atol
+    if mid >= y[1] - atol
         return 0, mid
     end
 
-    for k in 1:t-1
-        tail_sum -= λ[k]
-        mid = tail_sum / (t - k)
+    for iota in 1:(t - 1)
+        tail_sum -= y[iota]
+        mid = tail_sum / (t - iota)
 
-        if λ[k] > mid + atol && mid >= λ[k+1] - atol
-            return k, mid
+        if y[iota] > mid + atol && mid >= y[iota + 1] - atol
+            return iota, mid
         end
     end
 
-    error("Something is wrong. No k satisfies the condition.")
+    error("No valid iota found. Check that y is sorted and nonnegative.")
 end
 
 # ============================================================
-# f_t Function
+# f_t(M_psi(x); psi)
+# Original spectral objective, not the concave envelope.
 # ============================================================
+function f_t_from_F(
+    x::Vector{Float64},
+    F::AbstractMatrix{Float64},
+    t::Int,
+    psi::Float64,
+)
+    M = M_psi(x, F)
+
+    λ = eigvals(M)
+    λs = sort(λ, rev = true)
+
+    return sum(log.(λs[1:t] .+ psi))
+end
+
 function f_t(
     x::Vector{Float64},
-    At::AbstractMatrix{Float64},
+    C::AbstractMatrix{Float64},
     t::Int,
-    t_a::Float64,
+    psi::Float64,
 )
-    # Build M_{\psi}(x) = A(\psi) * Diag(x) * A(\psi)'
-    M = M_psi(x, At)
-
-    # Compute the t largest eigenvalues using Arpack
-    λ, _ = eigs(Symmetric(M), nev = t, which = :LM)
-    λ = real.(λ)
-
-    return sum(log.(λ .+ t_a))
+    F = compute_F(C; psi = psi)
+    return f_t_from_F(x, F, t, psi)
 end
 
 # ============================================================
-# GAug-Fact Objective Function
+# Gamma_t(M_psi(x); psi)
+# Concave envelope objective used in DDGFact^+
 # ============================================================
-function Gamma_t_from_At(
+function Gamma_t_from_F(
     x::Vector{Float64},
-    At::AbstractMatrix{Float64},
+    F::AbstractMatrix{Float64},
     t::Int,
-    t_a::Float64,
+    psi::Float64,
 )
-    M = M_psi(x, At)
-    λ = eigvals(Symmetric(M))
+    M = M_psi(x, F)
+
+    λ = eigvals(M)
     λs = sort(λ, rev = true)
 
     y = copy(λs)
-    y[1:t] .+= t_a
+    y[1:t] .+= psi
 
     iota, mid = find_iota(y, t)
 
+    val = 0.0
+
     if iota > 0
-        val = sum(log.(y[1:iota]))
-    else
-        val = 0.0
+        val += sum(log.(y[1:iota]))
     end
 
     val += (t - iota) * log(mid)
@@ -97,213 +136,122 @@ end
 
 function Gamma_t(
     x::Vector{Float64},
-    C::Matrix{Float64},
-    t::Int,
-    t_a::Float64,
-)
-    At = compute_At(C, t_a)
-    return Gamma_t_from_At(x, At, t, t_a)
-end
-
-# ============================================================
-# Spectral Bound
-# ============================================================
-function spectral_bound_util(
     C::AbstractMatrix{Float64},
-    t::Int64,
+    t::Int,
+    psi::Float64,
 )
-    # Compute the t largest eigenvalues using Arpack
-    λ, _ = eigs(Symmetric(C), nev = t, which = :LM)
-    λ = real.(λ)
-
-    # Sum of log of eigenvalues
-    return sum(log.(λ))
+    F = compute_F(C; psi = psi)
+    return Gamma_t_from_F(x, F, t, psi)
 end
 
 # ============================================================
-# Simplex Solution (closed-form for t=1)
+# Spectral Bound: sum_{ell=1}^t log(lambda_ell(C))
 # ============================================================
-function simplex_sol(At::AbstractMatrix{Float64}, s::Int)
-    n = size(At, 2)
+function spectral_bound(
+    C::AbstractMatrix{Float64},
+    t::Int,
+)
+    λ = eigvals(Symmetric(C))
+    λs = sort(λ, rev = true)
 
-    # Compute squared norm of each column
-    col_norms = vec(sum(abs2, At; dims = 1))
+    return sum(log.(λs[1:t]))
+end
 
-    # Get indices of the s largest norms
-    sorted_indices = partialsortperm(col_norms, 1:s; rev = true)
-    S_star = sorted_indices[1:s]
+# ============================================================
+# Closed-form solution of DDGFact^+ for t = 1
+# Selects the s largest row norms of F
+# ============================================================
+function closed_form_t1_from_F(
+    F::AbstractMatrix{Float64},
+    s::Int,
+)
+    n = size(F, 1)
 
-    # Build solution vector
-    x = zeros(n)
+    if s < 1 || s > n
+        error("s must satisfy 1 <= s <= n.")
+    end
+
+    row_norms = vec(sum(abs2, F; dims = 2))
+    S_star = partialsortperm(row_norms, 1:s; rev = true)
+
+    x = zeros(Float64, n)
     x[S_star] .= 1.0
 
-    return x
+    return x, S_star, row_norms
+end
+
+function closed_form_t1(
+    C::AbstractMatrix{Float64},
+    s::Int,
+    psi::Float64,
+)
+    F = compute_F(C; psi = psi)
+    return closed_form_t1_from_F(F, s)
 end
 
 # ============================================================
-# Spectral subgradient of Gamma_t
+# Spectral subgradient of Gamma_t at M
 # ============================================================
-function spectral_subgradient_Gamma_t(M::Matrix{Float64}, t::Int, t_a::Float64)
-    # --- Eigen-decomposition ---
+function spectral_subgradient_Gamma_t(
+    M::AbstractMatrix{Float64},
+    t::Int,
+    psi::Float64;
+    atol::Float64 = 1e-10,
+)
     eig = eigen(Symmetric(M))
     λ = eig.values
-    U = eig.vectors
-    n = length(λ)
+    Q = eig.vectors
 
-    # --- Sort eigenvalues descending ---
     perm = sortperm(λ, rev = true)
-    λs = Vector{Float64}(λ[perm])
-    Us = U[:, perm]
+    λs = λ[perm]
+    Qs = Q[:, perm]
 
-    # --- Add t_a ---
-    λs[1:t] .+= t_a
+    y = copy(λs)
+    y[1:t] .+= psi
 
-    # --- Determine k ---
-    iota, mid = find_iota(λs, t)
+    iota, mid = find_iota(y, t; atol = atol)
 
-    # --- Construct subgradient matrix ---
-    Y = zeros(n, n)
+    k = length(λs)
+    g = zeros(Float64, k)
 
-    # Top iota eigenvectors
     if iota > 0
-        Y .+= Us[:, 1:iota] * Diagonal(1 ./ λs[1:iota]) * Us[:, 1:iota]'
+        g[1:iota] .= 1.0 ./ y[1:iota]
     end
 
-    # Fractional weight for remaining eigenvectors
-    if iota < n
-        weight = 1.0 / mid
-        U_tail = Us[:, iota+1:end]
-        Y .+= U_tail * (weight * I(size(U_tail, 2))) * U_tail'
+    if iota < k
+        g[(iota + 1):k] .= 1.0 / mid
     end
 
-    return Y
+    G = Qs * Diagonal(g) * Qs'
+
+    return Symmetric(G)
 end
 
 # ============================================================
-# Spectral value and gradient of Gamma_t
+# Subgradient of x -> Gamma_t(M_psi(x); psi)
 # ============================================================
-# function spectral_value_gradient_Gamma_t(
-#     M::Matrix{Float64},
-#     At::AbstractMatrix{Float64},
-#     t::Int,
-#     t_a::Float64,
-# )
-#     # --- Eigen-decomposition ---
-#     eig = eigen(Symmetric(M))
-#     λ = eig.values
-#     U = eig.vectors
-#     n = length(λ)
-
-#     # --- Sort eigenvalues descending ---
-#     perm = sortperm(λ, rev = true)
-#     λs = Vector{Float64}(λ[perm])
-#     Us = U[:, perm]
-
-#     # --- Add t_a ---
-#     λs[1:t] .+= t_a
-
-#     # --- Determine iota ---
-#     iota, mid = find_iota(λs, t)
-
-#     # --- Compute objective value ---
-#     if iota > 0
-#         val = sum(log.(λs[1:iota]))
-#     else
-#         val = 0.0
-#     end
-
-#     val += (t - iota) * log(mid)
-
-#     # --- Construct eigenvalue weights ---
-#     weights = fill(1.0 / mid, n)
-
-#     if iota > 0
-#         weights[1:iota] .= 1.0 ./ λs[1:iota]
-#     end
-
-#     # --- Compute gradient without forming the full subgradient matrix ---
-#     B = At' * Us
-#     grad = vec(sum((B .^ 2) .* weights'; dims = 2))
-
-#     return val, grad
-# end
-
-# ============================================================
-# Spectral value and gradient of Gamma_t
-# ============================================================
-function spectral_value_gradient_Gamma_t(
-    M::Matrix{Float64},
-    At::AbstractMatrix{Float64},
+function x_subgradient_Gamma_t_from_F(
+    x::Vector{Float64},
+    F::AbstractMatrix{Float64},
     t::Int,
-    t_a::Float64,
+    psi::Float64;
+    atol::Float64 = 1e-10,
 )
-    n = size(M, 1)
+    M = M_psi(x, F)
+    G = spectral_supergradient_Gamma_t(M, t, psi; atol = atol)
 
-    # --- Top t eigenpairs only ---
-    λ, U = eigs(Symmetric(M), nev = t, which = :LM)
+    grad = vec(sum((F * G) .* F; dims = 2))
 
-    λ = real.(λ)
-    U = real.(U)
+    return grad
+end
 
-    # --- Sort eigenvalues descending ---
-    perm = sortperm(λ, rev = true)
-    λtop = Vector{Float64}(λ[perm])
-    Utop = U[:, perm]
-
-    # --- Add t_a to the top t eigenvalues ---
-    ytop = copy(λtop)
-    ytop .+= t_a
-
-    # --- Total sum of y ---
-    # y_j = λ_j + t_a for j <= t
-    # y_j = λ_j       for j > t
-    total_sum_y = tr(M) + t * t_a
-
-    # --- Determine iota ---
-    iota = 0
-    mid = total_sum_y / t
-
-    if !(mid >= ytop[1] - 1e-10)
-        prefix_sum = 0.0
-
-        found = false
-
-        for j in 1:t-1
-            prefix_sum += ytop[j]
-            mid = (total_sum_y - prefix_sum) / (t - j)
-
-            if ytop[j] > mid + 1e-10 && mid >= ytop[j+1] - 1e-10
-                iota = j
-                found = true
-                break
-            end
-        end
-
-        if !found
-            error("Something is wrong. No iota satisfies the condition.")
-        end
-    end
-
-    # --- Compute objective value ---
-    if iota > 0
-        val = sum(log.(ytop[1:iota]))
-    else
-        val = 0.0
-    end
-
-    val += (t - iota) * log(mid)
-
-    # --- Compute gradient without full eigendecomposition ---
-    col_norms = vec(sum(abs2, At; dims = 1))
-    grad = (1.0 / mid) .* col_norms
-
-    if iota > 0
-        U_iota = Utop[:, 1:iota]
-        B = At' * U_iota
-
-        correction_weights = (1.0 ./ ytop[1:iota]) .- (1.0 / mid)
-        grad .+= vec(sum((B .^ 2) .* correction_weights'; dims = 2))
-    end
-
-    return val, grad
+function x_supergradient_Gamma_t(
+    x::Vector{Float64},
+    C::AbstractMatrix{Float64},
+    t::Int,
+    psi::Float64;
+    atol::Float64 = 1e-10,
+)
+    F = compute_F(C; psi = psi)
+    return x_supergradient_Gamma_t_from_F(x, F, t, psi; atol = atol)
 end

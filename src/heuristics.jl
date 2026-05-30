@@ -49,17 +49,10 @@ function init_heur_soln(C::Symmetric{<:Real,<:AbstractMatrix},s::Int,t::Int, typ
             deleteat!(S, best_pos)
         end
     elseif type_init == :Simplex
-        # Choose ψ < λ_min(C)
-        psi = eigmin(C) - atol
-
-        # Compute A(ψ)
-        At = compute_At(Matrix(C), psi)
-
-        # Compute squared norm of each column
-        col_norms = vec(sum(abs2, At; dims = 1))
-
-        # Get indices of the s largest norms
-        S = partialsortperm(col_norms, 1:s; rev = true)
+        # Closed-form solution of DDGFact^+ for t = 1.
+        # It selects the s largest values of C_ii.
+        diag_C = diag(C)
+        S = partialsortperm(diag_C, 1:s; rev = true)
     else
         error("Unknown type_init = $(type_init)")
     end

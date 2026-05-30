@@ -14,7 +14,7 @@ include("heuristics.jl")
 include("solver_ipopt.jl")
 
 include("gscaling_util.jl")
-include("gscaling_bfgs_t1.jl")
+include("gscaling_bfgs.jl")
 include("gscaling_t1.jl")
 
 # -------------------------
@@ -73,12 +73,11 @@ verbose_bfgs = false
 # Data Collection
 # -------------------------
 solver = "ipopt"
-calib_method = "bfgs_psideriv"
-experiment = "t1_calibration_original_vs_reform"
+calib_method = "bfgs"
 
 mkpath("results")
 
-results_filepath = "results/results_gap_$(solver)_$(calib_method)_$(experiment)_n$(n).csv"
+results_filepath = "results/results_gap_$(solver)_$(calib_method)_n$(n).csv"
 results = []
 
 for s in s_vals

@@ -16,6 +16,9 @@ include("gscaling_util.jl")
 include("gscaling_bfgs.jl")
 include("gscaling_lbfgsb.jl")
 
+include("dual.jl")
+include("var_fixing.jl")
+
 # -------------------------
 # Problem data
 # -------------------------
@@ -26,7 +29,7 @@ kappa = 5
 # s_vals = [s for s in (kappa + 1):(n - 2)]
 
 # Test run:
-s_vals = [s for s in (kappa + 1):(kappa + 10)]
+s_vals = [s for s in (kappa + 1):(kappa + 5)]
 
 matfile = matopen("data/data$n.mat")
 C = n == 63 ? read(matfile, "A") : read(matfile, "C")
@@ -84,7 +87,7 @@ verbose_lbfgsb = false
 # Data Collection
 # -------------------------
 solver = "ipopt"
-calib_method = "bfgs_vs_bfgs_psideriv_vs_lbfgsb"
+calib_method = "bfgs"
 
 mkpath("results")
 
@@ -101,6 +104,10 @@ for s in s_vals
 
     result = []
     append!(result, [n, s, t])
+
+    # Root-node bounds
+    l_root = zeros(Float64, n)
+    c_root = ones(Float64, n)
 
     # -------------------------
     # DDGFact, non-augmented
@@ -131,7 +138,7 @@ for s in s_vals
 
     # -------------------------
     # DDGFact+_Upsilon, custom BFGS calibration
-    # fixed-psi subgradient
+    # corrected subgradient including psi derivative
     # -------------------------
     runtime_ddgfact_plus_upsilon_bfgs = @elapsed begin
         calib_result_bfgs = calibrate_upsilon_bfgs_ddfactplus(
@@ -150,7 +157,7 @@ for s in s_vals
             curvature_tol = curvature_tol,
             max_backtracks = max_backtracks,
             max_theta_norm = max_theta_norm,
-            psi_derivative = false,
+            psi_derivative = true,
             t1_reformulation = false,
             verbose = verbose_bfgs,
         )
@@ -166,95 +173,103 @@ for s in s_vals
 
     Cgamma_upsilon_bfgs = scaled_matrix(Csym, gamma_upsilon_bfgs)
     lambda_min_upsilon_bfgs = eigmin(Cgamma_upsilon_bfgs)
-    feasibility_slack_upsilon_bfgs = lambda_min_upsilon_bfgs - psi_upsilon_bfgs
-
-    # -------------------------
-    # DDGFact+_Upsilon, custom BFGS calibration
-    # corrected subgradient including psi derivative
-    # -------------------------
-    runtime_ddgfact_plus_upsilon_bfgs_psideriv = @elapsed begin
-        calib_result_bfgs_psideriv = calibrate_upsilon_bfgs_ddfactplus(
-            Csym,
-            s,
-            t;
-            atol = atol,
-            max_iter = max_bfgs_iter,
-            grad_tol = grad_tol,
-            step_tol = step_tol,
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-            alpha0 = alpha0,
-            alpha_min = alpha_min,
-            armijo_c1 = armijo_c1,
-            curvature_tol = curvature_tol,
-            max_backtracks = max_backtracks,
-            max_theta_norm = max_theta_norm,
-            psi_derivative = true,
-            t1_reformulation = false,
-            verbose = verbose_bfgs,
-        )
-
-        gamma_upsilon_bfgs_psideriv = calib_result_bfgs_psideriv.gamma
-        theta_upsilon_bfgs_psideriv = calib_result_bfgs_psideriv.theta
-        psi_upsilon_bfgs_psideriv = calib_result_bfgs_psideriv.psi
-
-        x_ddgfact_plus_upsilon_bfgs_psideriv = calib_result_bfgs_psideriv.x
-        y_ddgfact_plus_upsilon_bfgs_psideriv = calib_result_bfgs_psideriv.y
-        z_ddgfact_plus_upsilon_bfgs_psideriv = calib_result_bfgs_psideriv.obj
-    end
-
-    Cgamma_upsilon_bfgs_psideriv = scaled_matrix(Csym, gamma_upsilon_bfgs_psideriv)
-    lambda_min_upsilon_bfgs_psideriv = eigmin(Cgamma_upsilon_bfgs_psideriv)
-    feasibility_slack_upsilon_bfgs_psideriv =
-        lambda_min_upsilon_bfgs_psideriv - psi_upsilon_bfgs_psideriv
-
-    # -------------------------
-    # DDGFact+_Upsilon, LBFGSB calibration
-    # -------------------------
-    runtime_ddgfact_plus_upsilon_lbfgsb = @elapsed begin
-        calib_result_lbfgsb = calibrate_upsilon_lbfgsb_ddfactplus(
-            Csym,
-            s,
-            t;
-            atol = atol,
-
-            gamma_lower = gamma_lower,
-            gamma_upper = gamma_upper,
-
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-
-            lbfgsb_m = lbfgsb_m,
-            factr = lbfgsb_factr,
-            pgtol = lbfgsb_pgtol,
-            iprint = lbfgsb_iprint,
-            maxfun = lbfgsb_maxfun,
-            maxiter = lbfgsb_maxiter,
-
-            psi_derivative = true,
-            t1_reformulation = false,
-
-            verbose = verbose_lbfgsb,
-        )
-
-        gamma_upsilon_lbfgsb = calib_result_lbfgsb.gamma
-        theta_upsilon_lbfgsb = calib_result_lbfgsb.theta
-        psi_upsilon_lbfgsb = calib_result_lbfgsb.psi
-
-        x_ddgfact_plus_upsilon_lbfgsb = calib_result_lbfgsb.x
-        y_ddgfact_plus_upsilon_lbfgsb = calib_result_lbfgsb.y
-        z_ddgfact_plus_upsilon_lbfgsb = calib_result_lbfgsb.obj
-    end
-
-    Cgamma_upsilon_lbfgsb = scaled_matrix(Csym, gamma_upsilon_lbfgsb)
-    lambda_min_upsilon_lbfgsb = eigmin(Cgamma_upsilon_lbfgsb)
-    feasibility_slack_upsilon_lbfgsb = lambda_min_upsilon_lbfgsb - psi_upsilon_lbfgsb
+    feasibility_slack_upsilon_bfgs =
+        lambda_min_upsilon_bfgs - psi_upsilon_bfgs
 
     # -------------------------
     # Local search
+    # Needed before variable fixing because LB = z_ls
     # -------------------------
     runtime_ls = @elapsed begin
         x_ls, z_ls = run_all_LS(Csym, s, t)
+    end
+
+    # -------------------------
+    # Variable fixing at root node
+    # -------------------------
+
+    # DDGFact variable fixing, psi = 0
+    runtime_vf_ddgfact = @elapsed begin
+        F_ddgfact = compute_F(Csym; psi = 0.0, atol = atol)
+
+        vf_ddgfact = variable_fixing_from_DDGFact_x(
+            x_ddgfact,
+            F_ddgfact,
+            s,
+            t,
+            z_ls;
+            l = l_root,
+            c = c_root,
+            atol = atol,
+        )
+
+        n_fixed_ddgfact =
+            length(union(vf_ddgfact.fixing.fix_zero,
+                         vf_ddgfact.fixing.fix_one))
+    end
+
+    # DDGFact+ variable fixing, using psi
+    runtime_vf_ddgfact_plus = @elapsed begin
+        F_ddgfact_plus = compute_F(Csym; psi = psi, atol = atol)
+
+        vf_ddgfact_plus = variable_fixing_from_DDGFactplus_x(
+            x_ddgfact_plus,
+            F_ddgfact_plus,
+            s,
+            t,
+            psi,
+            z_ls;
+            l = l_root,
+            c = c_root,
+            atol = atol,
+        )
+
+        n_fixed_ddgfact_plus =
+            length(union(vf_ddgfact_plus.fixing.fix_zero,
+                         vf_ddgfact_plus.fixing.fix_one))
+    end
+
+    # Upsilon case: call the DDGFact variable-fixing construction
+    # on the scaled matrix, corresponding to psi = 0.
+    runtime_vf_ddgfact_upsilon_bfgs = @elapsed begin
+        F_ddgfact = compute_F(Csym; psi = 0.0, atol = atol)
+
+        vf_ddgfact_upsilon_bfgs = variable_fixing_from_DDGFact_x(
+            x_ddgfact_plus_upsilon_bfgs,
+            F_ddgfact,
+            s,
+            t,
+            z_ls;
+            l = l_root,
+            c = c_root,
+            atol = atol,
+        )
+
+        n_fixed_ddgfact_upsilon_bfgs =
+            length(union(vf_ddgfact_upsilon_bfgs.fixing.fix_zero,
+                         vf_ddgfact_upsilon_bfgs.fixing.fix_one))
+    end
+
+    # Upsilon case: call the DDGFact+ variable-fixing construction
+    # on the scaled matrix, using psi.
+    runtime_vf_ddgfact_plus_upsilon_bfgs = @elapsed begin
+        F_ddgfact_plus = compute_F(Csym; psi = psi, atol = atol)
+
+        vf_ddgfact_plus_upsilon_bfgs = variable_fixing_from_DDGFactplus_x(
+            x_ddgfact_plus_upsilon_bfgs,
+            F_ddgfact_plus,
+            s,
+            t,
+            psi,
+            z_ls;
+            l = l_root,
+            c = c_root,
+            atol = atol,
+        )
+
+        n_fixed_ddgfact_plus_upsilon_bfgs =
+            length(union(vf_ddgfact_plus_upsilon_bfgs.fixing.fix_zero,
+                         vf_ddgfact_plus_upsilon_bfgs.fixing.fix_one))
     end
 
     # -------------------------
@@ -271,26 +286,26 @@ for s in s_vals
             z_ddgfact - z_ls,
             z_ddgfact_plus - z_ls,
             z_ddgfact_plus_upsilon_bfgs - z_ls,
-            z_ddgfact_plus_upsilon_bfgs_psideriv - z_ls,
-            z_ddgfact_plus_upsilon_lbfgsb - z_ls,
             z_spec - z_ls,
 
             # Runtimes
             runtime_ddgfact,
             runtime_ddgfact_plus,
             runtime_ddgfact_plus_upsilon_bfgs,
-            runtime_ddgfact_plus_upsilon_bfgs_psideriv,
-            runtime_ddgfact_plus_upsilon_lbfgsb,
             runtime_ls,
             runtime_spec,
+
+            # Variable fixing counts
+            n_fixed_ddgfact,
+            n_fixed_ddgfact_plus,
+            n_fixed_ddgfact_upsilon_bfgs,
+            n_fixed_ddgfact_plus_upsilon_bfgs,
 
             # Objective values
             z_ls,
             z_ddgfact,
             z_ddgfact_plus,
             z_ddgfact_plus_upsilon_bfgs,
-            z_ddgfact_plus_upsilon_bfgs_psideriv,
-            z_ddgfact_plus_upsilon_lbfgsb,
             z_spec,
 
             # Psi and feasibility diagnostics
@@ -300,34 +315,10 @@ for s in s_vals
             lambda_min_upsilon_bfgs,
             feasibility_slack_upsilon_bfgs,
 
-            psi_upsilon_bfgs_psideriv,
-            lambda_min_upsilon_bfgs_psideriv,
-            feasibility_slack_upsilon_bfgs_psideriv,
-
-            psi_upsilon_lbfgsb,
-            lambda_min_upsilon_lbfgsb,
-            feasibility_slack_upsilon_lbfgsb,
-
             # Gamma diagnostics
             minimum(gamma_upsilon_bfgs),
             maximum(gamma_upsilon_bfgs),
             norm(theta_upsilon_bfgs),
-
-            minimum(gamma_upsilon_bfgs_psideriv),
-            maximum(gamma_upsilon_bfgs_psideriv),
-            norm(theta_upsilon_bfgs_psideriv),
-
-            minimum(gamma_upsilon_lbfgsb),
-            maximum(gamma_upsilon_lbfgsb),
-            norm(theta_upsilon_lbfgsb),
-
-            # Improvements over unscaled DDGFact+
-            z_ddgfact_plus - z_ddgfact_plus_upsilon_bfgs,
-            z_ddgfact_plus - z_ddgfact_plus_upsilon_bfgs_psideriv,
-            z_ddgfact_plus - z_ddgfact_plus_upsilon_lbfgsb,
-
-            # LBFGSB diagnostics
-            calib_result_lbfgsb.eval_count,
         ],
     )
 
@@ -337,21 +328,14 @@ for s in s_vals
     println("z_ddgfact:                           ", z_ddgfact)
     println("z_ddgfact_plus:                      ", z_ddgfact_plus)
     println("z_upsilon_bfgs:                      ", z_ddgfact_plus_upsilon_bfgs)
-    println("z_upsilon_bfgs_psideriv:             ", z_ddgfact_plus_upsilon_bfgs_psideriv)
-    println("z_upsilon_lbfgsb:                    ", z_ddgfact_plus_upsilon_lbfgsb)
     println("z_spec:                              ", z_spec)
 
-    println("gap_bfgs:                            ", z_ddgfact_plus_upsilon_bfgs - z_ls)
-    println("gap_bfgs_psideriv:                   ", z_ddgfact_plus_upsilon_bfgs_psideriv - z_ls)
-    println("gap_lbfgsb:                          ", z_ddgfact_plus_upsilon_lbfgsb - z_ls)
-
-    println("improvement_bfgs over DDG+:           ", z_ddgfact_plus - z_ddgfact_plus_upsilon_bfgs)
-    println("improvement_bfgs_psideriv over DDG+:  ", z_ddgfact_plus - z_ddgfact_plus_upsilon_bfgs_psideriv)
-    println("improvement_lbfgsb over DDG+:         ", z_ddgfact_plus - z_ddgfact_plus_upsilon_lbfgsb)
+    println("n_fixed_ddgfact:                     ", n_fixed_ddgfact)
+    println("n_fixed_ddgfact_plus:                ", n_fixed_ddgfact_plus)
+    println("n_fixed_ddgfact_upsilon_bfgs:        ", n_fixed_ddgfact_upsilon_bfgs)
+    println("n_fixed_ddgfact_plus_upsilon_bfgs:   ", n_fixed_ddgfact_plus_upsilon_bfgs)
 
     println("runtime_bfgs:                        ", runtime_ddgfact_plus_upsilon_bfgs)
-    println("runtime_bfgs_psideriv:               ", runtime_ddgfact_plus_upsilon_bfgs_psideriv)
-    println("runtime_lbfgsb:                      ", runtime_ddgfact_plus_upsilon_lbfgsb)
     flush(stdout)
 end
 
@@ -366,26 +350,26 @@ cols = [
     :ddgfact_gap,
     :ddgfact_plus_gap,
     :ddgfact_plus_upsilon_bfgs_gap,
-    :ddgfact_plus_upsilon_bfgs_psideriv_gap,
-    :ddgfact_plus_upsilon_lbfgsb_gap,
     :spec_gap,
 
     # Runtimes
     :ddgfact_runtime,
     :ddgfact_plus_runtime,
     :ddgfact_plus_upsilon_bfgs_runtime,
-    :ddgfact_plus_upsilon_bfgs_psideriv_runtime,
-    :ddgfact_plus_upsilon_lbfgsb_runtime,
     :local_search_runtime,
     :spectral_runtime,
+
+    # Variable fixing counts
+    :n_fixed_ddgfact,
+    :n_fixed_ddgfact_plus,
+    :n_fixed_ddgfact_upsilon_bfgs,
+    :n_fixed_ddgfact_plus_upsilon_bfgs,
 
     # Objective values
     :z_ls,
     :z_ddgfact,
     :z_ddgfact_plus,
     :z_ddgfact_plus_upsilon_bfgs,
-    :z_ddgfact_plus_upsilon_bfgs_psideriv,
-    :z_ddgfact_plus_upsilon_lbfgsb,
     :z_spec,
 
     # Psi and feasibility diagnostics
@@ -395,34 +379,10 @@ cols = [
     :lambda_min_upsilon_bfgs,
     :feasibility_slack_upsilon_bfgs,
 
-    :psi_upsilon_bfgs_psideriv,
-    :lambda_min_upsilon_bfgs_psideriv,
-    :feasibility_slack_upsilon_bfgs_psideriv,
-
-    :psi_upsilon_lbfgsb,
-    :lambda_min_upsilon_lbfgsb,
-    :feasibility_slack_upsilon_lbfgsb,
-
     # Gamma diagnostics
     :gamma_min_upsilon_bfgs,
     :gamma_max_upsilon_bfgs,
     :theta_norm_upsilon_bfgs,
-
-    :gamma_min_upsilon_bfgs_psideriv,
-    :gamma_max_upsilon_bfgs_psideriv,
-    :theta_norm_upsilon_bfgs_psideriv,
-
-    :gamma_min_upsilon_lbfgsb,
-    :gamma_max_upsilon_lbfgsb,
-    :theta_norm_upsilon_lbfgsb,
-
-    # Improvements over DDGFact+
-    :upsilon_bfgs_improvement_over_ddgfact_plus,
-    :upsilon_bfgs_psideriv_improvement_over_ddgfact_plus,
-    :upsilon_lbfgsb_improvement_over_ddgfact_plus,
-
-    # Extra diagnostics
-    :lbfgsb_eval_count,
 ]
 
 df = DataFrame(results_matrix, cols)
