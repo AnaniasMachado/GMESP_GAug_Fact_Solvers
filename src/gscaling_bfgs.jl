@@ -3,7 +3,36 @@ using Printf
 
 
 # ------------------------------------------------------------
+# Evaluate either the t=1 reformulation oracle or the original oracle
+# ------------------------------------------------------------
+function eval_ddfactplus_upsilon_calibration_oracle(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    theta::Vector{Float64},
+    s::Int,
+    t::Int;
+    atol::Float64 = 1e-10,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    psi_derivative::Bool = true,
+    use_t1_oracle::Bool = true,
+)
+    return eval_ddfactplus_upsilon_calibration(
+        C,
+        theta,
+        s,
+        t;
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
+        t1_reformulation = use_t1_oracle,
+    )
+end
+
+
+# ------------------------------------------------------------
 # BFGS calibration of Upsilon with psi = highest feasible value
+# Debug trajectory + repeated t1 fallback, without extra debug logs.
 # ------------------------------------------------------------
 function calibrate_upsilon_bfgs_ddfactplus(
     C::Symmetric{<:Real,<:AbstractMatrix},
@@ -23,18 +52,38 @@ function calibrate_upsilon_bfgs_ddfactplus(
     max_theta_norm::Float64 = 50.0,
     psi_derivative::Bool = true,
     t1_reformulation::Bool = true,
+    t1_fallback::Bool = true,
+    t1_fallback_limit::Int = 1,
+    theta_perturbation::Float64 = 1e-4,
+    use_steepest_descent_fallback::Bool = true,
     verbose::Bool = true,
 )
     n = size(C, 1)
     @assert 1 <= t <= s <= n
+    @assert t1_fallback_limit >= 0
 
-    # Initial values:
-    # Upsilon = ones(n), psi = lambda_min(C), implemented with a margin.
-    # theta = 1e-4 .* randn(n)
-    theta = t1_reformulation ? 1e-4 .* randn(n) : zeros(n)
+    # Same solution-trajectory initialization as the debug code.
+    # Set theta_perturbation = 0.0 if you want theta = zeros(n).
+    theta = theta_perturbation == 0.0 ? zeros(n) : theta_perturbation .* randn(n)
+
+    # Start with the requested oracle.
+    # true  => t=1 reformulation oracle
+    # false => original formulation oracle
+    current_use_t1_oracle = (t == 1) && t1_reformulation
+
+    fallback_used = false
+    fallback_count = 0
+    final_oracle = current_use_t1_oracle ? "t1_reformulation" : "original"
+
+    can_fallback() =
+        (t == 1) &&
+        t1_reformulation &&
+        t1_fallback &&
+        current_use_t1_oracle &&
+        fallback_count < t1_fallback_limit
 
     obj, g, gamma, psi, λmin, x, y =
-        eval_ddfactplus_upsilon_calibration(
+        eval_ddfactplus_upsilon_calibration_oracle(
             C,
             theta,
             s,
@@ -43,7 +92,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
             psi_margin = psi_margin,
             psi_floor = psi_floor,
             psi_derivative = psi_derivative,
-            t1_reformulation = t1_reformulation,
+            use_t1_oracle = current_use_t1_oracle,
         )
 
     unscaled_obj = obj
@@ -59,44 +108,41 @@ function calibrate_upsilon_bfgs_ddfactplus(
     best_x = copy(x)
     best_y = copy(y)
 
-    # Inverse Hessian approximation.
     H = Matrix{Float64}(I, n, n)
 
-    if verbose
-        @printf(
-            "BFGS iter %3d | obj = %.12e | psi = %.12e | lambda_min = %.12e | ||g|| = %.3e\n",
-            0,
-            obj,
-            psi,
-            λmin,
-            norm(g),
-        )
+    function update_best!()
+        if obj < best_obj
+            best_obj = obj
+            best_theta = copy(theta)
+            best_gamma = copy(gamma)
+            best_psi = psi
+            best_x = copy(x)
+            best_y = copy(y)
+        end
+        return nothing
     end
 
-    for k in 1:max_iter
-        ng = norm(g)
-
-        if ng <= grad_tol
-            verbose && println("Stopping: gradient norm below tolerance.")
-            break
-        end
-
-        # BFGS descent direction for minimization.
+    function try_one_step!(use_t1_oracle::Bool)
+        # ------------------------------------------------------------
+        # BFGS direction
+        # ------------------------------------------------------------
         p = -H * g
 
-        # If H became bad, reset to steepest descent.
         if dot(p, g) >= 0.0 || !all(isfinite, p)
+            verbose && println("  H produced non-descent or nonfinite direction. Resetting H.")
             H .= Matrix{Float64}(I, n, n)
             p = -g
         end
 
-        # Avoid huge moves in log-scaling space.
         np = norm(p)
         if np > 0.0
             p = p / max(1.0, np)
         end
 
+        descent_pred = dot(g, p)
+
         accepted = false
+        accepted_by_sd_fallback = false
         alpha = alpha0
 
         obj_trial = NaN
@@ -108,10 +154,12 @@ function calibrate_upsilon_bfgs_ddfactplus(
         x_trial = similar(x)
         y_trial = similar(y)
 
+        # ------------------------------------------------------------
+        # First try Armijo line search along BFGS direction.
+        # ------------------------------------------------------------
         for bt in 1:max_backtracks
             theta_candidate = theta .+ alpha .* p
 
-            # Prevent extreme exp(theta) overflow / underflow.
             if norm(theta_candidate, Inf) > max_theta_norm
                 alpha *= 0.5
                 if alpha < alpha_min
@@ -122,7 +170,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
 
             try
                 obj_cand, g_cand, gamma_cand, psi_cand, λmin_cand, x_cand, y_cand =
-                    eval_ddfactplus_upsilon_calibration(
+                    eval_ddfactplus_upsilon_calibration_oracle(
                         C,
                         theta_candidate,
                         s,
@@ -131,11 +179,10 @@ function calibrate_upsilon_bfgs_ddfactplus(
                         psi_margin = psi_margin,
                         psi_floor = psi_floor,
                         psi_derivative = psi_derivative,
-                        t1_reformulation = t1_reformulation,
+                        use_t1_oracle = use_t1_oracle,
                     )
 
-                # Armijo condition for minimizing the upper bound value.
-                if obj_cand <= obj + armijo_c1 * alpha * dot(g, p)
+                if obj_cand <= obj + armijo_c1 * alpha * descent_pred
                     theta_trial .= theta_candidate
                     obj_trial = obj_cand
                     g_trial .= g_cand
@@ -148,8 +195,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
                     break
                 end
             catch err
-                # Treat failed inner solves as rejected trial points.
-                verbose && println("  rejected trial step due to error: ", err)
+                verbose && println("  rejected BFGS trial step due to error: ", err)
             end
 
             alpha *= 0.5
@@ -158,23 +204,102 @@ function calibrate_upsilon_bfgs_ddfactplus(
             end
         end
 
-        if !accepted
-            verbose && println("Stopping: line search failed.")
-            break
+        # ------------------------------------------------------------
+        # Debug-code behavior:
+        # If BFGS line search fails, try steepest descent and accept any
+        # strict improvement.
+        # ------------------------------------------------------------
+        if !accepted && use_steepest_descent_fallback
+            verbose && println("  BFGS line search failed. Trying steepest-descent fallback.")
+
+            p_sd = -copy(g)
+            np_sd = norm(p_sd)
+
+            if np_sd > 0.0 && all(isfinite, p_sd)
+                p_sd ./= max(1.0, np_sd)
+
+                alpha = alpha0
+
+                for bt in 1:max_backtracks
+                    theta_candidate = theta .+ alpha .* p_sd
+
+                    if norm(theta_candidate, Inf) > max_theta_norm
+                        alpha *= 0.5
+                        if alpha < alpha_min
+                            break
+                        end
+                        continue
+                    end
+
+                    try
+                        obj_cand, g_cand, gamma_cand, psi_cand, λmin_cand, x_cand, y_cand =
+                            eval_ddfactplus_upsilon_calibration_oracle(
+                                C,
+                                theta_candidate,
+                                s,
+                                t;
+                                atol = atol,
+                                psi_margin = psi_margin,
+                                psi_floor = psi_floor,
+                                psi_derivative = psi_derivative,
+                                use_t1_oracle = use_t1_oracle,
+                            )
+
+                        if obj_cand < obj
+                            theta_trial .= theta_candidate
+                            obj_trial = obj_cand
+                            g_trial .= g_cand
+                            gamma_trial .= gamma_cand
+                            psi_trial = psi_cand
+                            λmin_trial = λmin_cand
+                            x_trial .= x_cand
+                            y_trial .= y_cand
+                            accepted = true
+                            accepted_by_sd_fallback = true
+
+                            # Debug-code behavior: reset H after SD fallback.
+                            H .= Matrix{Float64}(I, n, n)
+                            break
+                        end
+                    catch err
+                        verbose && println("  rejected SD trial step due to error: ", err)
+                    end
+
+                    alpha *= 0.5
+                    if alpha < alpha_min
+                        break
+                    end
+                end
+            end
         end
 
+        if !accepted
+            return (
+                accepted = false,
+                accepted_by_sd_fallback = false,
+                alpha = alpha,
+                step_norm = Inf,
+            )
+        end
+
+        # ------------------------------------------------------------
+        # BFGS update.
+        # Debug-code H trajectory:
+        # if SD fallback was accepted, skip curvature update and reset H.
+        # ------------------------------------------------------------
         s_bfgs = theta_trial .- theta
         y_bfgs = g_trial .- g
 
         sy = dot(s_bfgs, y_bfgs)
 
-        if sy > curvature_tol * norm(s_bfgs) * max(norm(y_bfgs), 1.0)
+        if !accepted_by_sd_fallback &&
+           sy > curvature_tol * norm(s_bfgs) * max(norm(y_bfgs), 1.0)
+
             ρ = 1.0 / sy
             V = Matrix{Float64}(I, n, n) .- ρ .* (s_bfgs * y_bfgs')
             H = V * H * V' .+ ρ .* (s_bfgs * s_bfgs')
             H = Symmetric(0.5 .* (H .+ H')) |> Matrix
         else
-            # Nonconvex/nonsmooth safeguard: skip or reset.
             H .= Matrix{Float64}(I, n, n)
         end
 
@@ -187,31 +312,150 @@ function calibrate_upsilon_bfgs_ddfactplus(
         obj = obj_trial
         g .= g_trial
 
-        if obj < best_obj
-            best_obj = obj
-            best_theta = copy(theta)
-            best_gamma = copy(gamma)
-            best_psi = psi
-            best_x = copy(x)
-            best_y = copy(y)
+        update_best!()
+
+        return (
+            accepted = true,
+            accepted_by_sd_fallback = accepted_by_sd_fallback,
+            alpha = alpha,
+            step_norm = norm(s_bfgs),
+        )
+    end
+
+    function fallback_to_original!(reason::String)
+        verbose && println(
+            "t=1 oracle $reason. Falling back to original formulation oracle " *
+            "($(fallback_count + 1)/$t1_fallback_limit).",
+        )
+
+        fallback_count += 1
+        fallback_used = true
+
+        # Temporarily switch to original formulation.
+        current_use_t1_oracle = false
+        final_oracle = "original"
+
+        # Reset BFGS memory after switching oracle, as in your current code.
+        H .= Matrix{Float64}(I, n, n)
+
+        obj, g, gamma, psi, λmin, x, y =
+            eval_ddfactplus_upsilon_calibration_oracle(
+                C,
+                theta,
+                s,
+                t;
+                atol = atol,
+                psi_margin = psi_margin,
+                psi_floor = psi_floor,
+                psi_derivative = psi_derivative,
+                use_t1_oracle = false,
+            )
+
+        update_best!()
+
+        if norm(g) <= grad_tol
+            verbose && println(
+                "Stopping: original formulation oracle has gradient norm below tolerance.",
+            )
+            return false
+        end
+
+        result = try_one_step!(false)
+
+        if !result.accepted
+            verbose && println("Stopping: original formulation fallback failed to improve.")
+            return false
+        end
+
+        # If original formulation successfully improves, switch back to t1
+        # and continue until t1 fails again or fallback limit is exhausted.
+        current_use_t1_oracle = true
+        final_oracle = "t1_reformulation"
+
+        return true
+    end
+
+    if verbose
+        @printf(
+            "BFGS iter %3d | oracle = %s | obj = %.12e | psi = %.12e | lambda_min = %.12e | ||g|| = %.3e\n",
+            0,
+            current_use_t1_oracle ? "t1" : "orig",
+            obj,
+            psi,
+            λmin,
+            norm(g),
+        )
+    end
+
+    for k in 1:max_iter
+        ng = norm(g)
+
+        # ------------------------------------------------------------
+        # Gradient norm termination.
+        # If t1 terminates and fallback remains, try original once.
+        # ------------------------------------------------------------
+        if ng <= grad_tol
+            if can_fallback()
+                ok = fallback_to_original!("reached grad_tol")
+                ok || break
+                continue
+            else
+                verbose && println("Stopping: gradient norm below tolerance.")
+                break
+            end
+        end
+
+        # ------------------------------------------------------------
+        # Try one step with the current oracle.
+        # ------------------------------------------------------------
+        result = try_one_step!(current_use_t1_oracle)
+
+        # ------------------------------------------------------------
+        # If t1 failed to improve, fallback to original if allowed.
+        # If original also fails, stop.
+        # ------------------------------------------------------------
+        if !result.accepted
+            if can_fallback()
+                ok = fallback_to_original!("failed to improve")
+                ok || break
+                continue
+            else
+                verbose && println("Stopping: line search failed.")
+                break
+            end
         end
 
         if verbose
+            accepted_type = result.accepted_by_sd_fallback ? "SD" : "BFGS"
             @printf(
-                "BFGS iter %3d | obj = %.12e | best = %.12e | psi = %.12e | lambda_min = %.12e | alpha = %.2e | ||g|| = %.3e\n",
+                "BFGS iter %3d | oracle = %s | accepted = %s | obj = %.12e | best = %.12e | psi = %.12e | lambda_min = %.12e | alpha = %.2e | ||g|| = %.3e | fallbacks = %d/%d\n",
                 k,
+                current_use_t1_oracle ? "t1" : "orig",
+                accepted_type,
                 obj,
                 best_obj,
                 psi,
                 λmin,
-                alpha,
+                result.alpha,
                 norm(g),
+                fallback_count,
+                t1_fallback_limit,
             )
         end
 
-        if norm(s_bfgs) <= step_tol
-            verbose && println("Stopping: step norm below tolerance.")
-            break
+        # ------------------------------------------------------------
+        # Step norm termination.
+        # If t1 terminates and fallback remains, try original once.
+        # ------------------------------------------------------------
+        if result.step_norm <= step_tol
+            if can_fallback()
+                ok = fallback_to_original!("reached step_tol")
+                ok || break
+                continue
+            else
+                verbose && println("Stopping: step norm below tolerance.")
+                break
+            end
         end
     end
 
@@ -224,6 +468,8 @@ function calibrate_upsilon_bfgs_ddfactplus(
         obj = best_obj,
         improved = best_obj < unscaled_obj,
         unscaled_obj = unscaled_obj,
+        fallback_used = fallback_used,
+        final_oracle = final_oracle,
+        fallback_count = fallback_count,
     )
 end
-

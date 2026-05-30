@@ -65,6 +65,8 @@ psi_floor = 0.0
 max_theta_norm = 20.0
 psi_derivative = true
 
+t1_fallback_limit = copy(max_bfgs_iter)
+
 verbose_bfgs = false
 
 # -------------------------
@@ -177,7 +179,8 @@ for s in s_vals
                 max_theta_norm = max_theta_norm,
                 psi_derivative = psi_derivative,
                 t1_reformulation = true,
-                t1_fallback = false,
+                t1_fallback = true,
+                t1_fallback_limit = t1_fallback_limit,
                 verbose = verbose_bfgs,
             )
 
@@ -196,6 +199,13 @@ for s in s_vals
     # -------------------------
     runtime_ls = @elapsed begin
         x_ls, z_ls = run_all_LS(Csym, s, t)
+    end
+
+    # -------------------------
+    # Spectral bound
+    # -------------------------
+    runtime_spec = @elapsed begin
+        z_spec = spectral_bound_solver(Csym, t)
     end
 
     # -------------------------
@@ -220,6 +230,7 @@ for s in s_vals
             z_ddgfact_plus - z_ls,
             z_bfgs_original - z_ls,
             z_bfgs_t1_reform - z_ls,
+            z_spec - z_ls,
 
             # Runtimes
             runtime_ddgfact,
@@ -227,6 +238,7 @@ for s in s_vals
             runtime_bfgs_original,
             runtime_bfgs_t1_reform,
             runtime_ls,
+            runtime_spec,
 
             # Objective values
             z_ls,
@@ -234,6 +246,7 @@ for s in s_vals
             z_ddgfact_plus,
             z_bfgs_original,
             z_bfgs_t1_reform,
+            z_spec,
 
             # Comparison between calibration variants
             z_bfgs_original - z_bfgs_t1_reform,
@@ -266,6 +279,7 @@ for s in s_vals
     println("z_ddgfact_plus:                      ", z_ddgfact_plus)
     println("z_bfgs_original:                     ", z_bfgs_original)
     println("z_bfgs_t1_reform:                    ", z_bfgs_t1_reform)
+    println("z_spec:                              ", z_spec)
 
     println("gap_ddgfact:                         ", z_ddgfact - z_ls)
     println("gap_ddgfact_plus:                    ", z_ddgfact_plus - z_ls)
@@ -298,6 +312,7 @@ cols = [
     :ddgfact_plus_gap,
     :ddgfact_plus_upsilon_bfgs_original_gap,
     :ddgfact_plus_upsilon_bfgs_t1_reform_gap,
+    :spec_gap,
 
     # Runtimes
     :ddgfact_runtime,
@@ -305,6 +320,7 @@ cols = [
     :ddgfact_plus_upsilon_bfgs_original_runtime,
     :ddgfact_plus_upsilon_bfgs_t1_reform_runtime,
     :local_search_runtime,
+    :spectral_runtime,
 
     # Objective values
     :z_ls,
@@ -312,6 +328,7 @@ cols = [
     :z_ddgfact_plus,
     :z_ddgfact_plus_upsilon_bfgs_original,
     :z_ddgfact_plus_upsilon_bfgs_t1_reform,
+    :z_spec,
 
     # Direct comparison
     :bfgs_t1_reform_improvement_over_original,

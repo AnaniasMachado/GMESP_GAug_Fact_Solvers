@@ -60,60 +60,6 @@ function compute_Tk_Lk(
     return K, T_list, L
 end
 
-# ============================================================
-# Recover the weights from active set
-# ============================================================
-# function recover_weights_from_active_set(
-#     alpha::Float64,
-#     eta::Float64,
-#     R::Vector{Float64},
-#     rho::Vector{Float64},
-#     K::Vector{Int},
-#     T_list::Vector{Vector{Int}};
-#     active_tol::Float64 = 1e-7,
-# )
-#     vals = alpha .* R .- rho
-#     maxval = maximum(vals)
-#     tol = active_tol * max(1.0, abs(maxval), abs(eta))
-
-#     active_pos = findall(abs.(vals .- maxval) .<= tol)
-
-#     if isempty(active_pos)
-#         active_pos = [argmax(vals)]
-#     end
-
-#     target = 1.0 / alpha
-#     Ract = R[active_pos]
-
-#     # If target is numerically equal to one active R, use that one.
-#     closest_local = argmin(abs.(Ract .- target))
-#     if abs(Ract[closest_local] - target) <= tol
-#         p = active_pos[closest_local]
-#         return [K[p]], [1.0], [T_list[p]]
-#     end
-
-#     # Otherwise find two active R-values bracketing target.
-#     low_candidates = [p for p in active_pos if R[p] <= target + tol]
-#     high_candidates = [p for p in active_pos if R[p] >= target - tol]
-
-#     if isempty(low_candidates) || isempty(high_candidates)
-#         # Numerical fallback: use closest active cut.
-#         p = active_pos[closest_local]
-#         return [K[p]], [1.0], [T_list[p]]
-#     end
-
-#     p_low = low_candidates[argmax(R[low_candidates])]
-#     p_high = high_candidates[argmin(R[high_candidates])]
-
-#     if p_low == p_high || abs(R[p_high] - R[p_low]) <= tol
-#         return [K[p_low]], [1.0], [T_list[p_low]]
-#     end
-
-#     w_low = (R[p_high] - target) / (R[p_high] - R[p_low])
-#     w_high = 1.0 - w_low
-
-#     return [K[p_low], K[p_high]], [w_low, w_high], [T_list[p_low], T_list[p_high]]
-# end
 
 # ============================================================
 # Recover the weights from active set
