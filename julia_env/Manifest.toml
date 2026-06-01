@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "a7efb5481bd271fc4a867792e1c0cb6fe9471a37"
+project_hash = "2f3db99abfe54e78f2b58789c50930c8ef8ea685"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -706,10 +706,10 @@ uuid = "ac6e5ff7-fb65-4e79-a425-ec3bc9c03011"
 version = "1.12.0"
 
 [[deps.KNITRO]]
-deps = ["KNITRO_jll", "Libdl"]
-git-tree-sha1 = "37e774dc3e94ef238991addb4a6308b0f685d69c"
+deps = ["Libdl"]
+git-tree-sha1 = "bf1206793806e01fde387c6694acf14317a3bc67"
 uuid = "67920dd8-b58e-52a8-8622-53c4cffbe346"
-version = "0.14.10"
+version = "0.14.8"
 weakdeps = ["MathOptInterface"]
 
     [deps.KNITRO.extensions]
@@ -717,9 +717,9 @@ weakdeps = ["MathOptInterface"]
 
 [[deps.KNITRO_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "f1fa02f8494c06bf1b3f771b3e090095db4403b9"
+git-tree-sha1 = "22b3bd87b4aa6175fc127726778ac7c6a4bfa29f"
 uuid = "0e6b36f8-8e90-4eb5-b54e-06f667ea875c"
-version = "15.1.0"
+version = "15.0.0"
 
 [[deps.LAME_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]

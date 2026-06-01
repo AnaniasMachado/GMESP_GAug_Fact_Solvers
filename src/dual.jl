@@ -1,4 +1,7 @@
 using LinearAlgebra
+using JuMP
+using Gurobi
+import MathOptInterface as MOI
 
 # ============================================================
 # Construct Theta_hat from a feasible DDGFact solution xhat
@@ -559,5 +562,323 @@ function DGFactplus_dual_solution_from_DDGFactplus_x(
         Q = sol_G.Q,
         central = sol_G.central,
         residual = sol_G.residual,
+    )
+end
+
+# ============================================================
+# Solve G_Upsilon(Theta_hat) by LP using Gurobi
+#
+# Given:
+#   d = diag(F * Theta_hat * F')
+#   q = log.(gamma)
+#
+# Solve:
+#   min  -upsilon'l + nu'c + tau*s + alpha*t
+#   s.t. d + upsilon - nu + rho - tau*e = 0
+#        -q + eta - rho - alpha*e = 0
+#        upsilon >= 0, nu >= 0, eta >= 0, rho >= 0
+#
+# This is the auxiliary LP from DGFact^+_Upsilon.
+# ============================================================
+function solve_GTheta_upsilon_with_gurobi(
+    d::Vector{Float64},
+    gamma::Vector{Float64},
+    s::Int,
+    t::Int;
+    l::Vector{Float64} = zeros(length(d)),
+    c::Vector{Float64} = ones(length(d)),
+    atol::Float64 = 1e-8,
+    silent::Bool = true,
+)
+    n = length(d)
+
+    if length(gamma) != n || length(l) != n || length(c) != n
+        error("d, gamma, l, and c must have the same length.")
+    end
+
+    if any(gamma .<= 0.0)
+        error("All entries of gamma must be strictly positive.")
+    end
+
+    if any(l .> c .+ atol)
+        error("Bounds must satisfy l <= c.")
+    end
+
+    if any((l .!= 0.0) .& (l .!= 1.0)) || any((c .!= 0.0) .& (c .!= 1.0))
+        error("Bounds l and c must be binary vectors.")
+    end
+
+    if sum(l) > s + atol || sum(c) < s - atol
+        error("The fixed-variable polytope is empty: need sum(l) <= s <= sum(c).")
+    end
+
+    q = log.(gamma)
+
+    model = Model(Gurobi.Optimizer)
+
+    if silent
+        set_silent(model)
+    end
+
+    @variable(model, upsilon[1:n] >= 0.0)
+    @variable(model, nu[1:n] >= 0.0)
+    @variable(model, eta[1:n] >= 0.0)
+    @variable(model, rho[1:n] >= 0.0)
+
+    # Free variables
+    @variable(model, tau)
+    @variable(model, alpha)
+
+    @constraint(
+        model,
+        [i in 1:n],
+        d[i] + upsilon[i] - nu[i] + rho[i] - tau == 0.0
+    )
+
+    @constraint(
+        model,
+        [i in 1:n],
+        -q[i] + eta[i] - rho[i] - alpha == 0.0
+    )
+
+    @objective(
+        model,
+        Min,
+        -sum(upsilon[i] * l[i] for i in 1:n)
+        + sum(nu[i] * c[i] for i in 1:n)
+        + tau * s
+        + alpha * t
+    )
+
+    optimize!(model)
+
+    status = termination_status(model)
+
+    if status != MOI.OPTIMAL
+        error("GTheta_upsilon LP was not solved to optimality. Status = $status.")
+    end
+
+    upsilon_val = value.(upsilon)
+    nu_val = value.(nu)
+    eta_val = value.(eta)
+    rho_val = value.(rho)
+    tau_val = value(tau)
+    alpha_val = value(alpha)
+
+    # Clean tiny numerical values
+    upsilon_val[abs.(upsilon_val) .<= atol] .= 0.0
+    nu_val[abs.(nu_val) .<= atol] .= 0.0
+    eta_val[abs.(eta_val) .<= atol] .= 0.0
+    rho_val[abs.(rho_val) .<= atol] .= 0.0
+
+    residual_x = d + upsilon_val - nu_val + rho_val .- tau_val
+    residual_y = -q + eta_val - rho_val .- alpha_val
+
+    if maximum(abs.(residual_x)) > 1e-6
+        error("x-dual equality residual too large: $(maximum(abs.(residual_x))).")
+    end
+
+    if maximum(abs.(residual_y)) > 1e-6
+        error("y-dual equality residual too large: $(maximum(abs.(residual_y))).")
+    end
+
+    if minimum(upsilon_val) < -atol
+        error("Constructed upsilon is not nonnegative.")
+    end
+
+    if minimum(nu_val) < -atol
+        error("Constructed nu is not nonnegative.")
+    end
+
+    if minimum(eta_val) < -atol
+        error("Constructed eta is not nonnegative.")
+    end
+
+    if minimum(rho_val) < -atol
+        error("Constructed rho is not nonnegative.")
+    end
+
+    linear_value =
+        -dot(upsilon_val, l) +
+        dot(nu_val, c) +
+        tau_val * s +
+        alpha_val * t
+
+    return (
+        upsilon = upsilon_val,
+        nu = nu_val,
+        eta = eta_val,
+        rho = rho_val,
+        tau = tau_val,
+        alpha = alpha_val,
+        linear_value = linear_value,
+        objective_value = objective_value(model),
+        residual_x = residual_x,
+        residual_y = residual_y,
+        status = status,
+    )
+end
+
+# ============================================================
+# Objective value of a feasible DGFact^+_Upsilon solution
+#
+# Fixed-variable DGFact^+_Upsilon objective:
+#   sum_{ell=k-t+1}^k h_psi(lambda_ell(Theta))
+#   - upsilon'l + nu'c + tau*s + alpha*t
+# ============================================================
+function DGFactplusUpsilon_objective_value(
+    Theta::AbstractMatrix{Float64},
+    upsilon::Vector{Float64},
+    nu::Vector{Float64},
+    tau::Float64,
+    alpha::Float64,
+    s::Int,
+    t::Int,
+    psi::Float64;
+    l::Vector{Float64} = zeros(length(upsilon)),
+    c::Vector{Float64} = ones(length(upsilon)),
+    atol::Float64 = 1e-10,
+)
+    theta_eigs = sort(eigvals(Symmetric(Theta)), rev = true)
+    k = length(theta_eigs)
+
+    if t < 1 || t > k
+        error("t must satisfy 1 <= t <= size(Theta, 1).")
+    end
+
+    smallest_t = theta_eigs[(k - t + 1):k]
+
+    spectral_part = sum(h_psi_value(w, psi; atol = atol) for w in smallest_t)
+
+    linear_part =
+        -dot(upsilon, l) +
+        dot(nu, c) +
+        tau * s +
+        alpha * t
+
+    return (
+        objective_value = spectral_part + linear_part,
+        spectral_part = spectral_part,
+        linear_part = linear_part,
+    )
+end
+
+# ============================================================
+# Full construction of a feasible DGFact^+_Upsilon solution
+# from a feasible DDGFact^+_Upsilon solution.
+#
+# Input:
+#   xhat feasible for DDGFact^+_Upsilon
+#   gamma = Upsilon vector
+#   F such that D_gamma^(1/2) C D_gamma^(1/2) - psi*I = F*F'
+#   t, psi
+#
+# Optional:
+#   yhat can be passed only for diagnostics.
+# ============================================================
+function DGFactplusUpsilon_dual_solution_from_DDGFactplusUpsilon_xy(
+    xhat::Vector{Float64},
+    gamma::Vector{Float64},
+    F::AbstractMatrix{Float64},
+    s::Int,
+    t::Int,
+    psi::Float64;
+    yhat = nothing,
+    l::Vector{Float64} = zeros(length(xhat)),
+    c::Vector{Float64} = ones(length(xhat)),
+    atol::Float64 = 1e-8,
+    silent::Bool = true,
+)
+    if psi <= 0.0
+        error("DGFact^+_Upsilon construction assumes psi > 0.")
+    end
+
+    n = length(xhat)
+
+    if length(gamma) != n || length(l) != n || length(c) != n
+        error("xhat, gamma, l, and c must have the same length.")
+    end
+
+    if any(gamma .<= 0.0)
+        error("All entries of gamma must be strictly positive.")
+    end
+
+    if any(l .> c)
+        error("Bounds must satisfy l <= c.")
+    end
+
+    if any((l .!= 0.0) .& (l .!= 1.0)) || any((c .!= 0.0) .& (c .!= 1.0))
+        error("Bounds l and c must be binary vectors.")
+    end
+
+    if abs(sum(xhat) - s) > 1e-5
+        @warn "xhat does not satisfy e'x = s within tolerance." sum_xhat = sum(xhat) s = s
+    end
+
+    theta_data = construct_Theta_from_x_DDGFactplus(
+        xhat,
+        F,
+        t,
+        psi;
+        atol = atol,
+    )
+
+    Theta = theta_data.Theta
+
+    # d = diag(F * Theta * F')
+    d = vec(sum((F * Theta) .* F; dims = 2))
+
+    sol_G = solve_GTheta_upsilon_with_gurobi(
+        d,
+        gamma,
+        s,
+        t;
+        l = l,
+        c = c,
+        atol = atol,
+        silent = silent,
+    )
+
+    obj = DGFactplusUpsilon_objective_value(
+        Theta,
+        sol_G.upsilon,
+        sol_G.nu,
+        sol_G.tau,
+        sol_G.alpha,
+        s,
+        t,
+        psi;
+        l = l,
+        c = c,
+        atol = atol,
+    )
+
+    q = log.(gamma)
+
+    primal_linear_value =
+        yhat === nothing ? nothing : dot(d, xhat) - dot(q, yhat)
+
+    return (
+        Theta = Theta,
+        upsilon = sol_G.upsilon,
+        nu = sol_G.nu,
+        eta = sol_G.eta,
+        rho = sol_G.rho,
+        tau = sol_G.tau,
+        alpha = sol_G.alpha,
+        objective_value = obj.objective_value,
+        spectral_part = obj.spectral_part,
+        linear_part = obj.linear_part,
+        d = d,
+        q = q,
+        beta = theta_data.beta,
+        lambda = theta_data.lambda,
+        y = theta_data.y,
+        iota = theta_data.iota,
+        mid = theta_data.mid,
+        residual_x = sol_G.residual_x,
+        residual_y = sol_G.residual_y,
+        primal_linear_value = primal_linear_value,
+        Gtheta_status = sol_G.status,
     )
 end

@@ -193,6 +193,17 @@ for s in s_vals
     end
 
     # -------------------------
+    # Optional feasibility diagnostics
+    # -------------------------
+    Cgamma_bfgs_original = scaled_matrix(Csym, gamma_bfgs_original)
+    lambda_min_bfgs_original = eigmin(Cgamma_bfgs_original)
+    feasibility_slack_bfgs_original = lambda_min_bfgs_original - psi_bfgs_original
+
+    Cgamma_bfgs_t1_reform = scaled_matrix(Csym, gamma_bfgs_t1_reform)
+    lambda_min_bfgs_t1_reform = eigmin(Cgamma_bfgs_t1_reform)
+    feasibility_slack_bfgs_t1_reform = lambda_min_bfgs_t1_reform - psi_bfgs_t1_reform
+
+    # -------------------------
     # Local search
     # Used only to compute gaps
     # -------------------------
@@ -206,17 +217,6 @@ for s in s_vals
     runtime_spec = @elapsed begin
         z_spec = spectral_bound_solver(Csym, t)
     end
-
-    # -------------------------
-    # Optional feasibility diagnostics
-    # -------------------------
-    Cgamma_bfgs_original = scaled_matrix(Csym, gamma_bfgs_original)
-    lambda_min_bfgs_original = eigmin(Cgamma_bfgs_original)
-    feasibility_slack_bfgs_original = lambda_min_bfgs_original - psi_bfgs_original
-
-    Cgamma_bfgs_t1_reform = scaled_matrix(Csym, gamma_bfgs_t1_reform)
-    lambda_min_bfgs_t1_reform = eigmin(Cgamma_bfgs_t1_reform)
-    feasibility_slack_bfgs_t1_reform = lambda_min_bfgs_t1_reform - psi_bfgs_t1_reform
 
     # -------------------------
     # Collect gaps and runtimes
@@ -273,28 +273,16 @@ for s in s_vals
 
     push!(results, result)
 
-    println("z_ls:                                ", z_ls)
-    println("z_ddgfact:                           ", z_ddgfact)
-    println("z_ddgfact_plus:                      ", z_ddgfact_plus)
-    println("z_bfgs_original:                     ", z_bfgs_original)
-    println("z_bfgs_t1_reform:                    ", z_bfgs_t1_reform)
-    println("z_spec:                              ", z_spec)
-
     println("gap_ddgfact:                         ", z_ddgfact - z_ls)
     println("gap_ddgfact_plus:                    ", z_ddgfact_plus - z_ls)
     println("gap_bfgs_original:                   ", z_bfgs_original - z_ls)
     println("gap_bfgs_t1_reform:                  ", z_bfgs_t1_reform - z_ls)
-
-    println("improvement_t1_reform_over_original: ", z_bfgs_original - z_bfgs_t1_reform)
+    println("gap_spec:                            ", z_spec - z_ls)
 
     println("runtime_ddgfact:                     ", runtime_ddgfact)
     println("runtime_ddgfact_plus:                ", runtime_ddgfact_plus)
     println("runtime_bfgs_original:               ", runtime_bfgs_original)
     println("runtime_bfgs_t1_reform:              ", runtime_bfgs_t1_reform)
-    println("runtime_saved_by_t1_reform:          ", runtime_bfgs_original - runtime_bfgs_t1_reform)
-
-    println("psi_bfgs_original:                   ", psi_bfgs_original)
-    println("psi_bfgs_t1_reform:                  ", psi_bfgs_t1_reform)
 
     flush(stdout)
 end

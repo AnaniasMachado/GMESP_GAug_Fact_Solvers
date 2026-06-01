@@ -3,6 +3,7 @@ using MAT
 using CSV
 using DataFrames
 using LinearAlgebra
+using Statistics
 using JuMP
 using Ipopt
 using LBFGSB
@@ -14,7 +15,7 @@ include("solver_ipopt.jl")
 
 include("gscaling_util.jl")
 include("gscaling_bfgs.jl")
-include("gscaling_lbfgsb.jl")
+include("gscaling_t1.jl")
 
 include("dual.jl")
 include("var_fixing.jl")
@@ -23,13 +24,13 @@ include("var_fixing.jl")
 # Problem data
 # -------------------------
 n = 63
-kappa = 0
 
+# For t = 1, we vary s directly.
 # Full run:
-# s_vals = [s for s in (kappa + 1):(n - 2)]
+# s_vals = [s for s in 2:(n - 2)]
 
 # Test run:
-s_vals = [s for s in (kappa + 1):(kappa + 5)]
+s_vals = [s for s in 2:12]
 
 matfile = matopen("data/data$n.mat")
 C = n == 63 ? read(matfile, "A") : read(matfile, "C")
@@ -39,12 +40,13 @@ C = Matrix{Float64}(C)
 Csym = Symmetric(C)
 
 atol = 1e-10
+t = 1
 
 # Initial unscaled psi for DDGFact+
 psi = eigmin(Csym) - atol
 
 # -------------------------
-# Custom BFGS calibration parameters
+# BFGS calibration parameters
 # -------------------------
 max_bfgs_iter = 100
 
@@ -64,24 +66,11 @@ psi_margin = 1e-7
 psi_floor = 0.0
 
 max_theta_norm = 20.0
+psi_derivative = true
+
+t1_fallback_limit = copy(max_bfgs_iter)
 
 verbose_bfgs = false
-
-# -------------------------
-# LBFGSB calibration parameters
-# -------------------------
-gamma_lower = 1e-6
-gamma_upper = 1e6
-
-lbfgsb_m = 10
-lbfgsb_factr = 1e7
-lbfgsb_pgtol = 1e-2
-
-lbfgsb_iprint = -1
-lbfgsb_maxfun = 15_000
-lbfgsb_maxiter = 200
-
-verbose_lbfgsb = false
 
 # -------------------------
 # Data Collection
@@ -91,12 +80,10 @@ calib_method = "bfgs"
 
 mkpath("results")
 
-results_filepath = "results/results_gap_varfix_$(solver)_$(calib_method)_n$(n)_kappa$(kappa).csv"
+results_filepath = "results/results_gap_varfix_$(solver)_$(calib_method)_n$(n).csv"
 results = []
 
 for s in s_vals
-    t = s - kappa
-
     println("--------------------")
     println("s: $s")
     println("t: $t")
@@ -136,6 +123,7 @@ for s in s_vals
         )
     end
 
+    Random.seed!(1)
     # -------------------------
     # DDGFact+_Upsilon, custom BFGS calibration
     # corrected subgradient including psi derivative
@@ -158,7 +146,9 @@ for s in s_vals
             max_backtracks = max_backtracks,
             max_theta_norm = max_theta_norm,
             psi_derivative = true,
-            t1_reformulation = false,
+            t1_reformulation = true,
+            t1_fallback = true,
+            t1_fallback_limit = t1_fallback_limit,
             verbose = verbose_bfgs,
         )
 
@@ -178,7 +168,7 @@ for s in s_vals
 
     # -------------------------
     # Local search
-    # Needed before variable fixing because LB = z_ls
+    # Used only to compute gaps
     # -------------------------
     runtime_ls = @elapsed begin
         x_ls, z_ls = run_all_LS(Csym, s, t)
@@ -229,31 +219,47 @@ for s in s_vals
                          vf_ddgfact_plus.fixing.fix_one))
     end
 
-    # DDGFact+Upsilon variable fixing
-    runtime_vf_ddgfact_plus_upsilon_bfgs = @elapsed begin
-        Cgamma_upsilon_bfgs = scaled_matrix(Csym, gamma_upsilon_bfgs)
+    # Upsilon case: call the DDGFact variable-fixing construction
+    # on the scaled matrix, corresponding to psi = 0.
+    runtime_vf_ddgfact_upsilon_bfgs = @elapsed begin
+        F_ddgfact = compute_F(Csym; psi = 0.0, atol = atol)
 
-        F_ddgfact_plus_upsilon_bfgs =
-            compute_F(Cgamma_upsilon_bfgs; psi = psi_upsilon_bfgs, atol = atol)
-
-        vf_ddgfact_plus_upsilon_bfgs = variable_fixing_from_DDGFactplusUpsilon_xy(
+        vf_ddgfact_upsilon_bfgs = variable_fixing_from_DDGFact_x(
             x_ddgfact_plus_upsilon_bfgs,
-            y_ddgfact_plus_upsilon_bfgs,
-            gamma_upsilon_bfgs,
-            F_ddgfact_plus_upsilon_bfgs,
+            F_ddgfact,
             s,
             t,
-            psi_upsilon_bfgs,
             z_ls;
             l = l_root,
             c = c_root,
             atol = atol,
-            silent = true,
+        )
+
+        n_fixed_ddgfact_upsilon_bfgs =
+            length(union(vf_ddgfact_upsilon_bfgs.fixing.fix_zero,
+                         vf_ddgfact_upsilon_bfgs.fixing.fix_one))
+    end
+
+    # Upsilon case: call the DDGFact+ variable-fixing construction
+    # on the scaled matrix, using psi.
+    runtime_vf_ddgfact_plus_upsilon_bfgs = @elapsed begin
+        F_ddgfact_plus = compute_F(Csym; psi = psi, atol = atol)
+
+        vf_ddgfact_plus_upsilon_bfgs = variable_fixing_from_DDGFactplus_x(
+            x_ddgfact_plus_upsilon_bfgs,
+            F_ddgfact_plus,
+            s,
+            t,
+            psi,
+            z_ls;
+            l = l_root,
+            c = c_root,
+            atol = atol,
         )
 
         n_fixed_ddgfact_plus_upsilon_bfgs =
             length(union(vf_ddgfact_plus_upsilon_bfgs.fixing.fix_zero,
-                        vf_ddgfact_plus_upsilon_bfgs.fixing.fix_one))
+                         vf_ddgfact_plus_upsilon_bfgs.fixing.fix_one))
     end
 
     # -------------------------
@@ -263,6 +269,9 @@ for s in s_vals
         z_spec = spectral_bound_solver(Csym, t)
     end
 
+    # -------------------------
+    # Collect gaps and runtimes
+    # -------------------------
     append!(
         result,
         [
@@ -282,6 +291,7 @@ for s in s_vals
             # Variable fixing counts
             n_fixed_ddgfact,
             n_fixed_ddgfact_plus,
+            n_fixed_ddgfact_upsilon_bfgs,
             n_fixed_ddgfact_plus_upsilon_bfgs,
 
             # Objective values
@@ -314,6 +324,7 @@ for s in s_vals
 
     println("n_fixed_ddgfact:                            ", n_fixed_ddgfact)
     println("n_fixed_ddgfact_plus:                       ", n_fixed_ddgfact_plus)
+    println("n_fixed_ddgfact_upsilon_bfgs:               ", n_fixed_ddgfact_upsilon_bfgs)
     println("n_fixed_ddgfact_plus_upsilon_bfgs:          ", n_fixed_ddgfact_plus_upsilon_bfgs)
 
     println("runtime_ddgfact:                            ", runtime_ddgfact)
@@ -346,6 +357,7 @@ cols = [
     # Variable fixing counts
     :n_fixed_ddgfact,
     :n_fixed_ddgfact_plus,
+    :n_fixed_ddgfact_upsilon_bfgs,
     :n_fixed_ddgfact_plus_upsilon_bfgs,
 
     # Objective values

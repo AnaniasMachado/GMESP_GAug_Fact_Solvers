@@ -84,26 +84,6 @@ for s in s_vals
     end
 
     # -------------------------
-    # DDGFact+_Upsilon, calibrated generalized scaling
-    # -------------------------
-    runtime_ddgfact_plus_upsilon = @elapsed begin
-        gamma_upsilon, x_ddgfact_plus_upsilon, y_ddgfact_plus_upsilon, z_ddgfact_plus_upsilon =
-            calibrate_gamma_ddfactplus_upsilon_penalty(
-                Csym,
-                s,
-                t,
-                psi;
-                atol = atol,
-                max_calib_iter = max_calib_iter,
-                alpha0 = alpha0,
-                rho = rho,
-                margin = margin,
-                tau = tau,
-                verbose = false,
-            )
-    end
-
-    # -------------------------
     # Local search
     # -------------------------
     x_ls, z_ls = run_all_LS(Csym, s, t)
@@ -118,11 +98,9 @@ for s in s_vals
         [
             z_ddgfact - z_ls,
             z_ddgfact_plus - z_ls,
-            z_ddgfact_plus_upsilon - z_ls,
             z_spec - z_ls,
             runtime_ddgfact,
             runtime_ddgfact_plus,
-            runtime_ddgfact_plus_upsilon,
         ],
     )
 
@@ -137,11 +115,9 @@ cols = [
     :t,
     :ddgfact_gap,
     :ddgfact_plus_gap,
-    :ddgfact_plus_upsilon_gap,
     :spec_gap,
     :ddgfact_runtime,
     :ddgfact_plus_runtime,
-    :ddgfact_plus_upsilon_runtime,
 ]
 
 df = DataFrame(results_matrix, cols)
