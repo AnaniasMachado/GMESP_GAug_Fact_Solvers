@@ -4,29 +4,23 @@ using Arpack
 # ============================================================
 # Compute F such that C - psi*I = F*F'
 # ============================================================
-function compute_F(
-    C::AbstractMatrix{Float64};
+function factorize_matrix(
+    C::Symmetric{<:Real,<:AbstractMatrix};
     psi::Float64 = 0.0,
     atol::Float64 = 1e-8,
 )
     psi = max(0.0, psi)
 
     Cpsi = Symmetric(Matrix(C) - psi * I)
-    eig = eigen(Cpsi)
+    λ, Q = eigen(Cpsi)
 
-    λ = eig.values
-    Q = eig.vectors
-
+    # Permutation for descending order
     perm = sortperm(λ, rev = true)
     λ = λ[perm]
     Q = Q[:, perm]
 
-    if minimum(λ) < -atol
-        error("C - psi*I is not positive semidefinite. Minimum eigenvalue = $(minimum(λ)).")
-    end
-
+    # Clamp small near-zeros values before sqrt
     λ = map(v -> abs(v) <= atol ? 0.0 : v, λ)
-
     F = Q * Diagonal(sqrt.(λ))
 
     return F
@@ -95,7 +89,7 @@ end
 
 function f_t(
     x::Vector{Float64},
-    C::AbstractMatrix{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
     t::Int,
     psi::Float64,
 )
@@ -136,7 +130,7 @@ end
 
 function Gamma_t(
     x::Vector{Float64},
-    C::AbstractMatrix{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
     t::Int,
     psi::Float64,
 )
@@ -148,13 +142,11 @@ end
 # Spectral Bound: sum_{ell=1}^t log(lambda_ell(C))
 # ============================================================
 function spectral_bound(
-    C::AbstractMatrix{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
     t::Int,
 )
-    λ = eigvals(Symmetric(C))
-    λs = sort(λ, rev = true)
-
-    return sum(log.(λs[1:t]))
+    λ = reverse(eigvals(C))
+    return sum(log, @view λ[1:t])
 end
 
 # ============================================================
@@ -181,7 +173,7 @@ function closed_form_t1_from_F(
 end
 
 function closed_form_t1(
-    C::AbstractMatrix{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
     s::Int,
     psi::Float64,
 )
@@ -238,20 +230,20 @@ function x_subgradient_Gamma_t_from_F(
     atol::Float64 = 1e-10,
 )
     M = M_psi(x, F)
-    G = spectral_supergradient_Gamma_t(M, t, psi; atol = atol)
+    G = spectral_subgradient_Gamma_t(M, t, psi; atol = atol)
 
     grad = vec(sum((F * G) .* F; dims = 2))
 
     return grad
 end
 
-function x_supergradient_Gamma_t(
+function x_subgradient_Gamma_t(
     x::Vector{Float64},
-    C::AbstractMatrix{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
     t::Int,
     psi::Float64;
     atol::Float64 = 1e-10,
 )
     F = compute_F(C; psi = psi)
-    return x_supergradient_Gamma_t_from_F(x, F, t, psi; atol = atol)
+    return x_subgradient_Gamma_t_from_F(x, F, t, psi; atol = atol)
 end

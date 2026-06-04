@@ -1,55 +1,7 @@
-function spectral_bound_solver(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    t::Integer
-)
-    λ = reverse(eigvals(C))
-    return sum(log, @view λ[1:t])
-end
+using LinearAlgebra
+using JuMP
+using Ipopt
 
-function factorize_matrix(
-    C::Symmetric{<:Real,<:AbstractMatrix};
-    atol=1e-8,
-    psi = 0
-)
-    psi = max(0,psi);          
-    λ,Q = eigen(C - psi*I);
-    perm = length(λ):-1:1           # permutation for descending order
-    λ = λ[perm];
-    Q = Q[:, perm];
-    # clamp small near-zeros values before sqrt
-    λ = map(x -> x < atol ? 0.0 : x, λ);
-    F = Q * Diagonal(sqrt.(λ));
-    return F
-end
-
-function find_iota(
-    λ::Vector{Float64},
-    t::Int64;
-    atol=1e-5,
-    check::Bool = false
-)
-    # check if λ satisfies conditions
-    k = length(λ)
-    if check
-        @assert(1 <= t <= k)
-        @assert(all(x -> x >= 0, λ))
-        @assert(issorted(λ;rev=true))
-    end
-    # case iota = 0
-    tail_sum = sum(λ);         # Σ_{ℓ=1}^k λ_ℓ
-    mid      = tail_sum/t    # (1/(t-ι)) Σ_{ℓ=ι+1}^k λ_ℓ
-    if mid >= (λ[1] - atol); return 0, mid; end; 
-    # case iota > 0
-    for iota in 1:t-1
-        tail_sum -= λ[iota]         # Σ_{ℓ=ι+1}^k λ_ℓ
-        mid       = tail_sum / (t - iota)   # (1/(t-ι)) Σ_{ℓ=ι+1}^k λ_ℓ  
-        # check condition           
-        if (mid >= λ[iota+1]- atol) && (λ[iota] > mid + atol)
-            return iota, mid                         # iota and middle value
-        end
-    end
-    error("Something is wrong. No ι satisfies the condition.")
-end
 
 function add_ipopt_options!(model)
     set_optimizer_attribute(model, "tol", 1e-8)

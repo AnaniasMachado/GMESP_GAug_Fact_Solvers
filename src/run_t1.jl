@@ -6,21 +6,24 @@ using LinearAlgebra
 using Statistics
 using JuMP
 using Ipopt
+using KNITRO
 using LBFGSB
 import MathOptInterface as MOI
 
 include("util.jl")
 include("heuristics.jl")
-include("solver_ipopt.jl")
+# include("solver_ipopt.jl")
+include("solver_knitro.jl")
 
 include("gscaling_util.jl")
 include("gscaling_bfgs.jl")
 include("gscaling_t1.jl")
+include("gscaling_params.jl")
 
 # -------------------------
 # Problem data
 # -------------------------
-n = 63
+n = 124
 
 # For t = 1, we vary s directly.
 # Full run:
@@ -42,42 +45,50 @@ t = 1
 # Initial unscaled psi for DDGFact+
 psi = eigmin(Csym) - atol
 
-# -------------------------
-# BFGS calibration parameters
-# -------------------------
-max_bfgs_iter = 100
+# ============================================================
+# Choose active BFGS parameter set
+# ============================================================
+# active_bfgs_param_set = :default
+# active_bfgs_param_set = :fast
+active_bfgs_param_set = :very_fast
 
-grad_tol = 1e-2
-step_tol = 1e-8
+bfgs_params = bfgs_param_sets[active_bfgs_param_set]
 
-alpha0 = 5.0
-alpha_min = 1e-10
-armijo_c1 = 1e-6
-max_backtracks = 30
+max_bfgs_iter = bfgs_params[:max_bfgs_iter]
 
-curvature_tol = 1e-12
+grad_tol = bfgs_params[:grad_tol]
+step_tol = bfgs_params[:step_tol]
 
-# Largest feasible psi will be:
-# psi(gamma) = lambda_min(D_gamma^(1/2) C D_gamma^(1/2)) - psi_margin
-psi_margin = 1e-7
-psi_floor = 0.0
+alpha0 = bfgs_params[:alpha0]
+alpha_min = bfgs_params[:alpha_min]
+alpha_decay = bfgs_params[:alpha_decay]
+armijo_c1 = bfgs_params[:armijo_c1]
+max_backtracks = bfgs_params[:max_backtracks]
 
-max_theta_norm = 20.0
-psi_derivative = true
+curvature_tol = bfgs_params[:curvature_tol]
 
-t1_fallback_limit = copy(max_bfgs_iter)
+psi_margin = bfgs_params[:psi_margin]
+psi_floor = bfgs_params[:psi_floor]
 
-verbose_bfgs = false
+max_theta_norm = bfgs_params[:max_theta_norm]
+psi_derivative = bfgs_params[:psi_derivative]
+
+use_steepest_descent_fallback = bfgs_params[:use_steepest_descent_fallback]
+
+verbose_bfgs = bfgs_params[:verbose_bfgs]
+
+t1_fallback_limit = max_bfgs_iter
 
 # -------------------------
 # Data Collection
 # -------------------------
-solver = "ipopt"
+solver = "knitro"
 calib_method = "bfgs"
+bfgs_param_set = "very_fast"
 
 mkpath("results")
 
-results_filepath = "results/results_gap_$(solver)_$(calib_method)_n$(n).csv"
+results_filepath = "results/results_t1_gap_$(solver)_$(calib_method)_n$(n)_$(bfgs_param_set).csv"
 results = []
 
 for s in s_vals
@@ -135,12 +146,14 @@ for s in s_vals
                 psi_floor = psi_floor,
                 alpha0 = alpha0,
                 alpha_min = alpha_min,
+                alpha_decay = alpha_decay,
                 armijo_c1 = armijo_c1,
                 curvature_tol = curvature_tol,
                 max_backtracks = max_backtracks,
                 max_theta_norm = max_theta_norm,
                 psi_derivative = psi_derivative,
                 t1_reformulation = false,
+                use_steepest_descent_fallback = use_steepest_descent_fallback,
                 verbose = verbose_bfgs,
             )
 
@@ -172,6 +185,7 @@ for s in s_vals
                 psi_floor = psi_floor,
                 alpha0 = alpha0,
                 alpha_min = alpha_min,
+                alpha_decay = alpha_decay,
                 armijo_c1 = armijo_c1,
                 curvature_tol = curvature_tol,
                 max_backtracks = max_backtracks,
@@ -180,6 +194,7 @@ for s in s_vals
                 t1_reformulation = true,
                 t1_fallback = true,
                 t1_fallback_limit = t1_fallback_limit,
+                use_steepest_descent_fallback = use_steepest_descent_fallback,
                 verbose = verbose_bfgs,
             )
 
@@ -215,7 +230,7 @@ for s in s_vals
     # Spectral bound
     # -------------------------
     runtime_spec = @elapsed begin
-        z_spec = spectral_bound_solver(Csym, t)
+        z_spec = spectral_bound(Csym, t)
     end
 
     # -------------------------

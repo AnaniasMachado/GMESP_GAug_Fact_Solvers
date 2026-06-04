@@ -497,8 +497,17 @@ function eval_ddfactplus_upsilon_calibration(
 
     if (t == 1) && t1_reformulation
         # Reformulation for t = 1
+        # result_t1_reform =
+        #     ddfact_upsilon_t1_ipopt(
+        #         C,
+        #         gamma,
+        #         s,
+        #         psi;
+        #         atol = atol,
+        #     )
+        
         result_t1_reform =
-            ddfact_upsilon_t1_ipopt(
+            ddfact_upsilon_t1_knitro(
                 C,
                 gamma,
                 s,

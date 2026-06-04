@@ -32,7 +32,6 @@ end
 
 # ------------------------------------------------------------
 # BFGS calibration of Upsilon with psi = highest feasible value
-# Debug trajectory + repeated t1 fallback, without extra debug logs.
 # ------------------------------------------------------------
 function calibrate_upsilon_bfgs_ddfactplus(
     C::Symmetric{<:Real,<:AbstractMatrix},
@@ -46,6 +45,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
     psi_floor::Float64 = 0.0,
     alpha0::Float64 = 1.0,
     alpha_min::Float64 = 1e-8,
+    alpha_decay::Float64 = 0.5,
     armijo_c1::Float64 = 1e-4,
     curvature_tol::Float64 = 1e-10,
     max_backtracks::Int = 20,
@@ -62,8 +62,6 @@ function calibrate_upsilon_bfgs_ddfactplus(
     @assert 1 <= t <= s <= n
     @assert t1_fallback_limit >= 0
 
-    # Same solution-trajectory initialization as the debug code.
-    # Set theta_perturbation = 0.0 if you want theta = zeros(n).
     theta = theta_perturbation == 0.0 ? zeros(n) : theta_perturbation .* randn(n)
 
     # Start with the requested oracle.
@@ -161,7 +159,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
             theta_candidate = theta .+ alpha .* p
 
             if norm(theta_candidate, Inf) > max_theta_norm
-                alpha *= 0.5
+                alpha = alpha * alpha_decay
                 if alpha < alpha_min
                     break
                 end
@@ -198,14 +196,13 @@ function calibrate_upsilon_bfgs_ddfactplus(
                 verbose && println("  rejected BFGS trial step due to error: ", err)
             end
 
-            alpha *= 0.5
+            alpha = alpha * alpha_decay
             if alpha < alpha_min
                 break
             end
         end
 
         # ------------------------------------------------------------
-        # Debug-code behavior:
         # If BFGS line search fails, try steepest descent and accept any
         # strict improvement.
         # ------------------------------------------------------------
@@ -224,7 +221,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
                     theta_candidate = theta .+ alpha .* p_sd
 
                     if norm(theta_candidate, Inf) > max_theta_norm
-                        alpha *= 0.5
+                        alpha = alpha * alpha_decay
                         if alpha < alpha_min
                             break
                         end
@@ -257,7 +254,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
                             accepted = true
                             accepted_by_sd_fallback = true
 
-                            # Debug-code behavior: reset H after SD fallback.
+                            # Reset H after SD fallback.
                             H .= Matrix{Float64}(I, n, n)
                             break
                         end
@@ -265,7 +262,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
                         verbose && println("  rejected SD trial step due to error: ", err)
                     end
 
-                    alpha *= 0.5
+                    alpha = alpha * alpha_decay
                     if alpha < alpha_min
                         break
                     end
@@ -284,7 +281,6 @@ function calibrate_upsilon_bfgs_ddfactplus(
 
         # ------------------------------------------------------------
         # BFGS update.
-        # Debug-code H trajectory:
         # if SD fallback was accepted, skip curvature update and reset H.
         # ------------------------------------------------------------
         s_bfgs = theta_trial .- theta
@@ -335,7 +331,7 @@ function calibrate_upsilon_bfgs_ddfactplus(
         current_use_t1_oracle = false
         final_oracle = "original"
 
-        # Reset BFGS memory after switching oracle, as in your current code.
+        # Reset BFGS memory after switching oracle.
         H .= Matrix{Float64}(I, n, n)
 
         obj, g, gamma, psi, λmin, x, y =

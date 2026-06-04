@@ -5,12 +5,14 @@ using DataFrames
 using LinearAlgebra
 using JuMP
 using Ipopt
+using KNITRO
 using LBFGSB
 import MathOptInterface as MOI
 
 include("util.jl")
 include("heuristics.jl")
-include("solver_ipopt.jl")
+# include("solver_ipopt.jl")
+include("solver_knitro.jl")
 
 include("gscaling_util.jl")
 include("gscaling_bfgs.jl")
@@ -22,14 +24,14 @@ include("var_fixing.jl")
 # -------------------------
 # Problem data
 # -------------------------
-n = 63
-kappa = 0
+n = 90
+kappa = 1
 
 # Full run:
 # s_vals = [s for s in (kappa + 1):(n - 2)]
 
 # Test run:
-s_vals = [s for s in (kappa + 1):(kappa + 5)]
+s_vals = [s for s in (kappa + 1):(kappa + 10)]
 
 matfile = matopen("data/data$n.mat")
 C = n == 63 ? read(matfile, "A") : read(matfile, "C")
@@ -86,12 +88,12 @@ verbose_lbfgsb = false
 # -------------------------
 # Data Collection
 # -------------------------
-solver = "ipopt"
+solver = "knitro"
 calib_method = "bfgs"
 
 mkpath("results")
 
-results_filepath = "results/results_gap_varfix_$(solver)_$(calib_method)_n$(n)_kappa$(kappa).csv"
+results_filepath = "results/results_gap_vf_$(solver)_$(calib_method)_n$(n)_kappa$(kappa).csv"
 results = []
 
 for s in s_vals
@@ -190,9 +192,9 @@ for s in s_vals
 
     # DDGFact variable fixing, psi = 0
     runtime_vf_ddgfact = @elapsed begin
-        F_ddgfact = compute_F(Csym; psi = 0.0, atol = atol)
+        F_ddgfact = factorize_matrix(Csym; psi = 0.0, atol = atol)
 
-        vf_ddgfact = variable_fixing_from_DDGFact_x(
+        vf_ddgfact_dual = var_fixing_DDGFact_dual(
             x_ddgfact,
             F_ddgfact,
             s,
@@ -203,16 +205,16 @@ for s in s_vals
             atol = atol,
         )
 
-        n_fixed_ddgfact =
-            length(union(vf_ddgfact.fixing.fix_zero,
-                         vf_ddgfact.fixing.fix_one))
+        n_fixed_ddgfact_dual =
+            length(union(vf_ddgfact_dual.fixing.fix_zero,
+                         vf_ddgfact_dual.fixing.fix_one))
     end
 
     # DDGFact+ variable fixing, using psi
     runtime_vf_ddgfact_plus = @elapsed begin
-        F_ddgfact_plus = compute_F(Csym; psi = psi, atol = atol)
+        F_ddgfact_plus = factorize_matrix(Csym; psi = psi, atol = atol)
 
-        vf_ddgfact_plus = variable_fixing_from_DDGFactplus_x(
+        vf_ddgfact_plus_dual = var_fixing_DDGFactplus_dual(
             x_ddgfact_plus,
             F_ddgfact_plus,
             s,
@@ -224,9 +226,34 @@ for s in s_vals
             atol = atol,
         )
 
-        n_fixed_ddgfact_plus =
-            length(union(vf_ddgfact_plus.fixing.fix_zero,
-                         vf_ddgfact_plus.fixing.fix_one))
+        n_fixed_ddgfact_plus_dual =
+            length(union(vf_ddgfact_plus_dual.fixing.fix_zero,
+                         vf_ddgfact_plus_dual.fixing.fix_one))
+
+        vf_ddgfact_plus_primal = var_fixing_DDGFactplus_primal(
+            x_ddgfact_plus,
+            F_ddgfact_plus,
+            s,
+            t,
+            psi,
+            z_ls;
+            l = zeros(Float64, n),
+            c = ones(Float64, n),
+            atol = atol,
+        )
+
+        n_fixed_ddgfact_plus_primal =
+            length(union(vf_ddgfact_plus_primal.fix_zero, vf_ddgfact_plus_primal.fix_one))
+
+        fixed_ddgfact_plus_dual =
+            union(vf_ddgfact_plus_dual.fixing.fix_zero,
+                vf_ddgfact_plus_dual.fixing.fix_one)
+
+        fixed_ddgfact_plus_primal =
+            union(vf_ddgfact_plus_primal.fix_zero,
+                vf_ddgfact_plus_primal.fix_one)
+
+        n_fixed_ddgfact_plus_union = length(union(fixed_ddgfact_plus_dual, fixed_ddgfact_plus_primal))
     end
 
     # DDGFact+Upsilon variable fixing
@@ -234,9 +261,9 @@ for s in s_vals
         Cgamma_upsilon_bfgs = scaled_matrix(Csym, gamma_upsilon_bfgs)
 
         F_ddgfact_plus_upsilon_bfgs =
-            compute_F(Cgamma_upsilon_bfgs; psi = psi_upsilon_bfgs, atol = atol)
+            factorize_matrix(Cgamma_upsilon_bfgs; psi = psi_upsilon_bfgs, atol = atol)
 
-        vf_ddgfact_plus_upsilon_bfgs = variable_fixing_from_DDGFactplusUpsilon_xy(
+        vf_ddgfact_plus_upsilon_bfgs_dual = var_fixing_DDGFactplusUpsilon_dual_strong(
             x_ddgfact_plus_upsilon_bfgs,
             y_ddgfact_plus_upsilon_bfgs,
             gamma_upsilon_bfgs,
@@ -251,16 +278,45 @@ for s in s_vals
             silent = true,
         )
 
-        n_fixed_ddgfact_plus_upsilon_bfgs =
-            length(union(vf_ddgfact_plus_upsilon_bfgs.fixing.fix_zero,
-                        vf_ddgfact_plus_upsilon_bfgs.fixing.fix_one))
+        n_fixed_ddgfact_plus_upsilon_bfgs_dual =
+            length(union(vf_ddgfact_plus_upsilon_bfgs_dual.fixing.fix_zero,
+                        vf_ddgfact_plus_upsilon_bfgs_dual.fixing.fix_one))
+
+        vf_ddgfact_plus_upsilon_bfgs_primal = var_fixing_DDGFactplusUpsilon_primal(
+            x_ddgfact_plus_upsilon_bfgs,
+            y_ddgfact_plus_upsilon_bfgs,
+            gamma_upsilon_bfgs,
+            F_ddgfact_plus_upsilon_bfgs,
+            s,
+            t,
+            psi_upsilon_bfgs,
+            z_ls;
+            l = l_root,
+            c = c_root,
+            atol = atol,
+            silent = true,
+        )
+
+        n_fixed_ddgfact_plus_upsilon_bfgs_primal =
+            length(union(vf_ddgfact_plus_upsilon_bfgs_primal.fix_zero,
+                        vf_ddgfact_plus_upsilon_bfgs_primal.fix_one))
+
+        fixed_ddgfact_plus_upsilon_bfgs_dual =
+            union(vf_ddgfact_plus_upsilon_bfgs_dual.fixing.fix_zero,
+                vf_ddgfact_plus_upsilon_bfgs_dual.fixing.fix_one)
+
+        fixed_ddgfact_plus_upsilon_bfgs_primal =
+            union(vf_ddgfact_plus_upsilon_bfgs_primal.fix_zero,
+                vf_ddgfact_plus_upsilon_bfgs_primal.fix_one)
+
+        n_fixed_ddgfact_plus_upsilon_bfgs_union = length(union(fixed_ddgfact_plus_upsilon_bfgs_dual, fixed_ddgfact_plus_upsilon_bfgs_primal))
     end
 
     # -------------------------
     # Spectral bound
     # -------------------------
     runtime_spec = @elapsed begin
-        z_spec = spectral_bound_solver(Csym, t)
+        z_spec = spectral_bound(Csym, t)
     end
 
     append!(
@@ -280,9 +336,13 @@ for s in s_vals
             runtime_spec,
 
             # Variable fixing counts
-            n_fixed_ddgfact,
-            n_fixed_ddgfact_plus,
-            n_fixed_ddgfact_plus_upsilon_bfgs,
+            n_fixed_ddgfact_dual,
+            n_fixed_ddgfact_plus_dual,
+            n_fixed_ddgfact_plus_primal,
+            n_fixed_ddgfact_plus_union,
+            n_fixed_ddgfact_plus_upsilon_bfgs_dual,
+            n_fixed_ddgfact_plus_upsilon_bfgs_primal,
+            n_fixed_ddgfact_plus_upsilon_bfgs_union,
 
             # Objective values
             z_ls,
@@ -307,18 +367,22 @@ for s in s_vals
 
     push!(results, result)
 
-    println("gap_ddgfact:                                ", z_ddgfact - z_ls)
-    println("gap_ddgfact_plus:                           ", z_ddgfact_plus - z_ls)
-    println("gap_ddgfact_plus_upsilon:                   ", z_ddgfact_plus_upsilon_bfgs - z_ls)
-    println("gap_spec:                                   ", z_spec - z_ls)
+    println("gap_ddgfact:                                            ", z_ddgfact - z_ls)
+    println("gap_ddgfact_plus:                                       ", z_ddgfact_plus - z_ls)
+    println("gap_ddgfact_plus_upsilon:                               ", z_ddgfact_plus_upsilon_bfgs - z_ls)
+    println("gap_spec:                                               ", z_spec - z_ls)
 
-    println("n_fixed_ddgfact:                            ", n_fixed_ddgfact)
-    println("n_fixed_ddgfact_plus:                       ", n_fixed_ddgfact_plus)
-    println("n_fixed_ddgfact_plus_upsilon_bfgs:          ", n_fixed_ddgfact_plus_upsilon_bfgs)
+    println("n_fixed_ddgfact_dual:                                   ", n_fixed_ddgfact_dual)
+    println("n_fixed_ddgfact_plus_dual:                              ", n_fixed_ddgfact_plus_dual)
+    println("n_fixed_ddgfact_plus_primal:                            ", n_fixed_ddgfact_plus_primal)
+    println("n_fixed_ddgfact_plus_union:                             ", n_fixed_ddgfact_plus_union)
+    println("n_fixed_ddgfact_plus_upsilon_bfgs_dual:                 ", n_fixed_ddgfact_plus_upsilon_bfgs_dual)
+    println("n_fixed_ddgfact_plus_upsilon_bfgs_primal:               ", n_fixed_ddgfact_plus_upsilon_bfgs_primal)
+    println("n_fixed_ddgfact_plus_upsilon_bfgs_union:                ", n_fixed_ddgfact_plus_upsilon_bfgs_union)
 
-    println("runtime_ddgfact:                            ", runtime_ddgfact)
-    println("runtime_ddgfact_plus:                       ", runtime_ddgfact_plus)
-    println("runtime_ddgfact_plus_upsilon:               ", runtime_ddgfact_plus_upsilon_bfgs)
+    println("runtime_ddgfact:                                        ", runtime_ddgfact)
+    println("runtime_ddgfact_plus:                                   ", runtime_ddgfact_plus)
+    println("runtime_ddgfact_plus_upsilon:                           ", runtime_ddgfact_plus_upsilon_bfgs)
 
     flush(stdout)
 end
@@ -344,9 +408,13 @@ cols = [
     :spectral_runtime,
 
     # Variable fixing counts
-    :n_fixed_ddgfact,
-    :n_fixed_ddgfact_plus,
-    :n_fixed_ddgfact_plus_upsilon_bfgs,
+    :n_fixed_ddgfact_dual,
+    :n_fixed_ddgfact_plus_dual,
+    :n_fixed_ddgfact_plus_primal,
+    :n_fixed_ddgfact_plus_union,
+    :n_fixed_ddgfact_plus_upsilon_bfgs_dual,
+    :n_fixed_ddgfact_plus_upsilon_bfgs_primal,
+    :n_fixed_ddgfact_plus_upsilon_bfgs_union,
 
     # Objective values
     :z_ls,

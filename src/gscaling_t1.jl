@@ -1,5 +1,6 @@
 using LinearAlgebra
 using JuMP
+using Gurobi
 using Ipopt
 import MathOptInterface as MOI
 
@@ -11,6 +12,13 @@ function add_ipopt_options!(model)
     set_optimizer_attribute(model, "acceptable_tol", 1e-8)
     set_optimizer_attribute(model, "acceptable_constr_viol_tol", 1e-8)
     set_optimizer_attribute(model, "acceptable_iter", 0)
+end
+
+
+function add_knitro_options!(model)
+    set_optimizer_attribute(model, "outlev", 0)
+    set_optimizer_attribute(model, "opttol", 1e-8)
+    set_optimizer_attribute(model, "feastol", 1e-8)
 end
 
 # ============================================================
@@ -126,9 +134,8 @@ function recover_weights_from_active_set(
     #   omega >= 0
     #
     # Objective is zero; this is only a feasibility problem.
-    model = Model(Ipopt.Optimizer)
-    set_silent(model)
-    add_ipopt_options!(model)
+    model = Model(Gurobi.Optimizer)
+    set_optimizer_attribute(model, "OutputFlag", 0)
 
     m = length(active_pos)
 
@@ -139,7 +146,7 @@ function recover_weights_from_active_set(
 
     optimize!(model)
 
-    if termination_status(model) in (MOI.LOCALLY_SOLVED, MOI.OPTIMAL)
+    if termination_status(model) == MOI.OPTIMAL
         omega_val = value.(omega)
 
         keep = findall(omega_val .> 1e-9)
@@ -268,6 +275,110 @@ function ddfact_upsilon_t1_ipopt(
     end
 
     # Objective recomputed from recovered primal solution.
+    primal_obj = log(dot(d_vec, x_val) + psi) - dot(rho, y_val)
+
+    return (
+        x = x_val,
+        y = y_val,
+        obj_val = obj_val,
+        primal_obj = primal_obj,
+        alpha = alpha_val,
+        eta = eta_val,
+        active_k = active_k,
+        omega = omega,
+        active_T = active_T,
+        R = R,
+        L = L,
+        K = K,
+        d = d_vec,
+        termination_status = termination_status(model),
+        primal_status = primal_status(model),
+        dual_status = dual_status(model),
+    )
+end
+
+function ddfact_upsilon_t1_knitro(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    s::Integer,
+    psi::Float64;
+    J::Vector{Int} = Int[],
+    d = nothing,
+    atol::Float64 = 1e-10,
+    active_tol::Float64 = 1e-7,
+    silent::Bool = true,
+)
+    n = size(C, 1)
+
+    @assert size(C, 2) == n
+    @assert length(gamma) == n
+    @assert all(gamma .> 0)
+    @assert 1 <= s <= n
+    @assert length(J) <= s
+    @assert all(1 .<= J .<= n)
+
+    rho = log.(gamma)
+
+    d_vec =
+        d === nothing ?
+        collect(gamma .* diag(C) .- psi) :
+        collect(Float64.(d))
+
+    @assert length(d_vec) == n
+
+    K, T_list, L = compute_Tk_Lk(d_vec, s; J = J)
+    R = psi .+ L
+
+    if any(R .<= 0.0)
+        bad = K[findfirst(R .<= 0.0)]
+        error(
+            "Encountered R_k <= 0 for k = $bad. " *
+            "The logarithm domain assumption is violated for at least one support."
+        )
+    end
+
+    model = Model(KNITRO.Optimizer)
+    add_knitro_options!(model)
+
+    if silent
+        set_silent(model)
+    end
+
+    alpha_start = length(R) / sum(R)
+
+    @variable(model, alpha >= atol, start = alpha_start)
+    @variable(model, eta)
+
+    @constraint(model, envelope[p = 1:length(K)], eta >= R[p] * alpha - rho[K[p]])
+
+    @NLobjective(model, Min, eta - log(alpha) - 1.0)
+
+    optimize!(model)
+
+    alpha_val = value(alpha)
+    eta_val = value(eta)
+    obj_val = objective_value(model)
+
+    active_k, omega, active_T = recover_weights_from_active_set(
+        alpha_val,
+        eta_val,
+        R,
+        rho[K],
+        K,
+        T_list;
+        active_tol = active_tol,
+    )
+
+    x_val = zeros(n)
+    y_val = zeros(n)
+
+    for (w, k, T) in zip(omega, active_k, active_T)
+        for i in T
+            x_val[i] += w
+        end
+        y_val[k] += w
+    end
+
     primal_obj = log(dot(d_vec, x_val) + psi) - dot(rho, y_val)
 
     return (
