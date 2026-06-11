@@ -19,17 +19,30 @@ function ddfact_gmesp(
     C::Symmetric{<:Real,<:AbstractMatrix},
     s::Integer,
     t::Integer;
+    J1::AbstractVector{<:Integer} = Int[],
     atol = 1e-10,
 )
     n = size(C, 1)
     @assert 1 <= t <= s <= n
+    @assert all(i -> 1 <= i <= n, J1)
+    @assert length(unique(J1)) == length(J1)
+    @assert length(J1) <= s
+
+    J1 = sort(unique(collect(J1)))
+    Jfree = setdiff(1:n, J1)
 
     model = Model(KNITRO.Optimizer)
     add_knitro_options!(model)
     set_silent(model)
 
     @variable(model, atol <= x[i = 1:n] <= 1 - atol)
-    @constraint(model, sum(x) == s)
+
+    for i in J1
+        set_upper_bound(x[i], 1.0)
+        fix(x[i], 1.0; force = true)
+    end
+
+    @constraint(model, sum(x[i] for i in Jfree) == s - length(J1))
 
     if t == 1
         # ------------------------------------------------------------
@@ -147,17 +160,30 @@ function aug_ddfact_gmesp(
     s::Integer,
     t::Integer,
     psi::Float64;
+    J1::AbstractVector{<:Integer} = Int[],
     atol = 1e-10,
 )
     n = size(C, 1)
     @assert 1 <= t <= s <= n
+    @assert all(i -> 1 <= i <= n, J1)
+    @assert length(unique(J1)) == length(J1)
+    @assert length(J1) <= s
+
+    J1 = sort(unique(collect(J1)))
+    Jfree = setdiff(1:n, J1)
 
     model = Model(KNITRO.Optimizer)
     add_knitro_options!(model)
     set_silent(model)
 
     @variable(model, atol <= x[i = 1:n] <= 1 - atol)
-    @constraint(model, sum(x) == s)
+
+    for i in J1
+        set_upper_bound(x[i], 1.0)
+        fix(x[i], 1.0; force = true)
+    end
+
+    @constraint(model, sum(x[i] for i in Jfree) == s - length(J1))
 
     if t == 1
         # ------------------------------------------------------------
@@ -285,6 +311,7 @@ function aug_ddfact_upsilon_gmesp(
     s::Integer,
     t::Integer,
     psi::Float64;
+    J1::AbstractVector{<:Integer} = Int[],
     atol = 1e-10,
 )
     n = size(C, 1)
@@ -292,6 +319,12 @@ function aug_ddfact_upsilon_gmesp(
     @assert length(gamma) == n
     @assert all(gamma .> 0)
     @assert 1 <= t <= s <= n
+    @assert all(i -> 1 <= i <= n, J1)
+    @assert length(unique(J1)) == length(J1)
+    @assert length(J1) <= s
+
+    J1 = sort(unique(collect(J1)))
+    Jfree = setdiff(1:n, J1)
 
     log_gamma = log.(gamma)
 
@@ -302,7 +335,12 @@ function aug_ddfact_upsilon_gmesp(
     @variable(model, atol <= x[i = 1:n] <= 1 - atol)
     @variable(model, atol <= y[i = 1:n] <= 1 - atol)
 
-    @constraint(model, sum(x) == s)
+    for i in J1
+        set_upper_bound(x[i], 1.0)
+        fix(x[i], 1.0; force = true)
+    end
+
+    @constraint(model, sum(x[i] for i in Jfree) == s - length(J1))
     @constraint(model, sum(y) == t)
     @constraint(model, [i = 1:n], y[i] <= x[i])
 

@@ -139,6 +139,188 @@ function Gamma_t(
 end
 
 # ============================================================
+# DDGFact objective value at a fixed x
+#
+# This is Gamma_t(M_0(x); 0), i.e., the DDGFact relaxation
+# objective evaluated at x.
+# ============================================================
+function DDGFact_value_at_x(
+    x::Vector{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    t::Int;
+    atol::Float64 = 1e-8,
+)
+    F = factorize_matrix(C; psi = 0.0, atol = atol)
+
+    return Gamma_t_from_F(
+        x,
+        F,
+        t,
+        0.0,
+    )
+end
+
+
+# ============================================================
+# DDGFact^+ objective value at a fixed x
+#
+# This is Gamma_t(M_psi(x); psi), i.e., the DDGFact^+
+# relaxation objective evaluated at x.
+# ============================================================
+function DDGFactplus_value_at_x(
+    x::Vector{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    t::Int,
+    psi::Float64;
+    atol::Float64 = 1e-8,
+)
+    F = factorize_matrix(C; psi = psi, atol = atol)
+
+    return Gamma_t_from_F(
+        x,
+        F,
+        t,
+        psi,
+    )
+end
+
+
+# ============================================================
+# DDGFact^+_Upsilon objective value from F
+#
+# Objective:
+#
+#   Gamma_t(M_{Upsilon,psi}(x); psi)
+#       - sum_i log(gamma_i) y_i
+#
+# Here F satisfies
+#
+#   Diagonal(sqrt(gamma)) * C * Diagonal(sqrt(gamma)) - psi I = F F'
+# ============================================================
+function Gamma_t_upsilon_from_F(
+    x::Vector{Float64},
+    y::Vector{Float64},
+    gamma::Vector{Float64},
+    F::AbstractMatrix{Float64},
+    t::Int,
+    psi::Float64,
+)
+    n = length(x)
+
+    if length(y) != n || length(gamma) != n || size(F, 1) != n
+        error("x, y, gamma, and F must have compatible dimensions.")
+    end
+
+    if any(gamma .<= 0.0)
+        error("gamma must be strictly positive.")
+    end
+
+    log_gamma = log.(gamma)
+
+    return Gamma_t_from_F(
+        x,
+        F,
+        t,
+        psi,
+    ) - dot(log_gamma, y)
+end
+
+
+# ============================================================
+# Best y for DDGFact^+_Upsilon at a binary x
+#
+# Given binary x and sum(y) = t, 0 <= y <= x, the term involving y is
+#
+#   - sum_i log(gamma_i) y_i.
+#
+# Thus, for fixed x, the best y selects the t indices in support(x)
+# with the smallest log(gamma_i).
+# ============================================================
+function best_y_upsilon_at_binary_x(
+    x::Vector{Float64},
+    gamma::Vector{Float64},
+    t::Int;
+    atol::Float64 = 1e-8,
+)
+    n = length(x)
+
+    if length(gamma) != n
+        error("x and gamma must have the same length.")
+    end
+
+    if any(gamma .<= 0.0)
+        error("gamma must be strictly positive.")
+    end
+
+    support = findall(i -> x[i] >= 1.0 - atol, 1:n)
+
+    if t < 1 || t > length(support)
+        error("Need 1 <= t <= number of selected variables in x.")
+    end
+
+    log_gamma = log.(gamma)
+
+    selected_y =
+        support[partialsortperm(log_gamma[support], 1:t; rev = false)]
+
+    y = zeros(Float64, n)
+    y[selected_y] .= 1.0
+
+    return y
+end
+
+
+# ============================================================
+# DDGFact^+_Upsilon objective value at a fixed binary x
+#
+# This evaluates
+#
+#   Gamma_t(M_{Upsilon,psi}(x); psi)
+#       - sum_i log(gamma_i) y_i
+#
+# using the best y for the given binary x.
+# ============================================================
+function DDGFactplusUpsilon_value_at_x(
+    x::Vector{Float64},
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    t::Int,
+    psi::Float64;
+    atol::Float64 = 1e-8,
+)
+    n = length(x)
+
+    if length(gamma) != n || size(C, 1) != n
+        error("x, gamma, and C must have compatible dimensions.")
+    end
+
+    F = scaled_factorize_matrix(
+        C,
+        gamma,
+        psi;
+        atol = atol,
+    )
+
+    y = best_y_upsilon_at_binary_x(
+        x,
+        gamma,
+        t;
+        atol = atol,
+    )
+
+    val = Gamma_t_upsilon_from_F(
+        x,
+        y,
+        gamma,
+        F,
+        t,
+        psi,
+    )
+
+    return val, y, F
+end
+
+# ============================================================
 # Spectral Bound: sum_{ell=1}^t log(lambda_ell(C))
 # ============================================================
 function spectral_bound(
@@ -155,7 +337,9 @@ end
 # ============================================================
 function closed_form_t1_from_F(
     F::AbstractMatrix{Float64},
-    s::Int,
+    s::Int;
+    J1::AbstractVector{<:Integer} = Int[],
+    J0::AbstractVector{<:Integer} = Int[],
 )
     n = size(F, 1)
 
@@ -163,8 +347,39 @@ function closed_form_t1_from_F(
         error("s must satisfy 1 <= s <= n.")
     end
 
+    J1 = sort(unique(collect(J1)))
+    J0 = sort(unique(collect(J0)))
+
+    if any(i -> i < 1 || i > n, J1)
+        error("All indices in J1 must satisfy 1 <= i <= n.")
+    end
+
+    if any(i -> i < 1 || i > n, J0)
+        error("All indices in J0 must satisfy 1 <= i <= n.")
+    end
+
+    if !isempty(intersect(J1, J0))
+        error("J1 and J0 must be disjoint.")
+    end
+
+    if length(J1) > s
+        error("The fixed-one set J1 cannot have cardinality larger than s.")
+    end
+
+    Jfree = setdiff(1:n, union(J1, J0))
+    m = s - length(J1)
+
+    if m > length(Jfree)
+        error("Not enough free variables to satisfy cardinality s.")
+    end
+
     row_norms = vec(sum(abs2, F; dims = 2))
-    S_star = partialsortperm(row_norms, 1:s; rev = true)
+
+    S_free =
+        m == 0 ? Int[] :
+        Jfree[partialsortperm(row_norms[Jfree], 1:m; rev = true)]
+
+    S_star = sort(union(J1, S_free))
 
     x = zeros(Float64, n)
     x[S_star] .= 1.0

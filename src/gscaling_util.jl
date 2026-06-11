@@ -480,12 +480,25 @@ function eval_ddfactplus_upsilon_calibration(
     theta::Vector{Float64},
     s::Int,
     t::Int;
+    J1::AbstractVector{<:Integer} = Int[],
+    J0::AbstractVector{<:Integer} = Int[],
     atol::Float64 = 1e-10,
     psi_margin::Float64 = 1e-8,
     psi_floor::Float64 = 0.0,
     psi_derivative::Bool = true,
     t1_reformulation::Bool = true,
 )
+    n = size(C, 1)
+
+    J1 = sort(unique(collect(J1)))
+    J0 = sort(unique(collect(J0)))
+
+    @assert all(i -> 1 <= i <= n, J1)
+    @assert all(i -> 1 <= i <= n, J0)
+    @assert isempty(intersect(J1, J0))
+    @assert length(J1) <= s
+    @assert s <= n - length(J0)
+
     gamma = exp.(theta)
 
     psi, λmin = max_feasible_psi(
@@ -503,15 +516,17 @@ function eval_ddfactplus_upsilon_calibration(
         #         gamma,
         #         s,
         #         psi;
+        #         J1 = J1,
         #         atol = atol,
         #     )
-        
+
         result_t1_reform =
             ddfact_upsilon_t1_knitro(
                 C,
                 gamma,
                 s,
                 psi;
+                J1 = J1,
                 atol = atol,
             )
 
@@ -531,6 +546,7 @@ function eval_ddfactplus_upsilon_calibration(
             s,
             t,
             psi;
+            J1 = J1,
             atol = atol,
         )
     end

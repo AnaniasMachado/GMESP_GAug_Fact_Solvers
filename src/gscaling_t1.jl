@@ -27,13 +27,13 @@ end
 function compute_Tk_Lk(
     d::AbstractVector{<:Real},
     s::Integer;
-    J::Vector{Int} = Int[],
+    J1::Vector{Int} = Int[],
 )
     n = length(d)
     @assert 1 <= s <= n
-    @assert all(1 .<= J .<= n)
-    @assert length(unique(J)) == length(J)
-    @assert length(J) <= s
+    @assert all(1 .<= J1 .<= n)
+    @assert length(unique(J1)) == length(J1)
+    @assert length(J1) <= s
 
     order = sortperm(collect(d); rev = true)
 
@@ -42,7 +42,7 @@ function compute_Tk_Lk(
     L = Float64[]
 
     for k in 1:n
-        required = unique(vcat(J, k))
+        required = unique(vcat(J1, k))
         if length(required) > s
             continue
         end
@@ -198,7 +198,7 @@ function ddfact_upsilon_t1_ipopt(
     gamma::Vector{Float64},
     s::Integer,
     psi::Float64;
-    J::Vector{Int} = Int[],
+    J1::Vector{Int} = Int[],
     d = nothing,
     atol::Float64 = 1e-10,
     active_tol::Float64 = 1e-7,
@@ -210,8 +210,8 @@ function ddfact_upsilon_t1_ipopt(
     @assert length(gamma) == n
     @assert all(gamma .> 0)
     @assert 1 <= s <= n
-    @assert length(J) <= s
-    @assert all(1 .<= J .<= n)
+    @assert length(J1) <= s
+    @assert all(1 .<= J1 .<= n)
 
     rho = log.(gamma)
 
@@ -222,7 +222,7 @@ function ddfact_upsilon_t1_ipopt(
 
     @assert length(d_vec) == n
 
-    K, T_list, L = compute_Tk_Lk(d_vec, s; J = J)
+    K, T_list, L = compute_Tk_Lk(d_vec, s; J1 = J1)
     R = psi .+ L
 
     if any(R .<= 0.0)
@@ -302,7 +302,7 @@ function ddfact_upsilon_t1_knitro(
     gamma::Vector{Float64},
     s::Integer,
     psi::Float64;
-    J::Vector{Int} = Int[],
+    J1::Vector{Int} = Int[],
     d = nothing,
     atol::Float64 = 1e-10,
     active_tol::Float64 = 1e-7,
@@ -314,8 +314,8 @@ function ddfact_upsilon_t1_knitro(
     @assert length(gamma) == n
     @assert all(gamma .> 0)
     @assert 1 <= s <= n
-    @assert length(J) <= s
-    @assert all(1 .<= J .<= n)
+    @assert length(J1) <= s
+    @assert all(1 .<= J1 .<= n)
 
     rho = log.(gamma)
 
@@ -326,7 +326,7 @@ function ddfact_upsilon_t1_knitro(
 
     @assert length(d_vec) == n
 
-    K, T_list, L = compute_Tk_Lk(d_vec, s; J = J)
+    K, T_list, L = compute_Tk_Lk(d_vec, s; J1 = J1)
     R = psi .+ L
 
     if any(R .<= 0.0)

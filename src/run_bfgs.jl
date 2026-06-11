@@ -4,14 +4,12 @@ using CSV
 using DataFrames
 using LinearAlgebra
 using JuMP
-using Ipopt
 using KNITRO
 using LBFGSB
 import MathOptInterface as MOI
 
 include("util.jl")
 include("heuristics.jl")
-# include("solver_ipopt.jl")
 include("solver_knitro.jl")
 
 include("gscaling_util.jl")
@@ -24,7 +22,7 @@ include("var_fixing.jl")
 # -------------------------
 # Problem data
 # -------------------------
-n = 90
+n = 63
 kappa = 1
 
 # Full run:
@@ -48,15 +46,16 @@ psi = eigmin(Csym) - atol
 # -------------------------
 # Custom BFGS calibration parameters
 # -------------------------
-max_bfgs_iter = 100
+max_bfgs_iter = 50
 
 grad_tol = 1e-2
 step_tol = 1e-8
 
-alpha0 = 5.0
+alpha0 = 1.0
 alpha_min = 1e-10
+alpha_decay = 0.75
 armijo_c1 = 1e-6
-max_backtracks = 30
+max_backtracks = 50
 
 curvature_tol = 1e-12
 
@@ -68,22 +67,6 @@ psi_floor = 0.0
 max_theta_norm = 20.0
 
 verbose_bfgs = false
-
-# -------------------------
-# LBFGSB calibration parameters
-# -------------------------
-gamma_lower = 1e-6
-gamma_upper = 1e6
-
-lbfgsb_m = 10
-lbfgsb_factr = 1e7
-lbfgsb_pgtol = 1e-2
-
-lbfgsb_iprint = -1
-lbfgsb_maxfun = 15_000
-lbfgsb_maxiter = 200
-
-verbose_lbfgsb = false
 
 # -------------------------
 # Data Collection
@@ -155,6 +138,7 @@ for s in s_vals
             psi_floor = psi_floor,
             alpha0 = alpha0,
             alpha_min = alpha_min,
+            alpha_decay = alpha_decay,
             armijo_c1 = armijo_c1,
             curvature_tol = curvature_tol,
             max_backtracks = max_backtracks,
