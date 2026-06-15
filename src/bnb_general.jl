@@ -8,13 +8,11 @@ using Printf
 #   include("bnb_util.jl")
 #
 # Main options:
-#   - fixing_rule = :none
-#   - root_bfgs_param_set separate from bfgs_param_set
-#   - root_after_psi0_bfgs_param_set for the second root optimization when
-#     root_psi0_warm_start = true
-#   - warm_start_parent_upsilon option
-#   - reuse_parent_upsilon option
-#   - optional root psi=0 Upsilon warm start before root DDGFactplusUpsilon
+#   - relaxation = DDGFact, DDGFactplus, or DDGFactplusUpsilon
+#   - fixing_rule = :none, :dual, :primal, or :both
+#   - calibration_method = :bfgs, :rbfgs, or :prox_step for DDGFactplusUpsilon
+#   - root_calibration_params controls root-node Upsilon calibration
+#   - node_calibration_params controls child/rebound-node Upsilon calibration
 # =============================================================================
 
 
@@ -88,8 +86,8 @@ end
 function _make_node_kwargs(;
     relaxation,
     psi,
-    bfgs_param_set,
-    bfgs_param_sets,
+    calibration_method,
+    calibration_params,
     atol,
     psi_margin,
     psi_floor,
@@ -98,8 +96,8 @@ function _make_node_kwargs(;
     return (
         relaxation = relaxation,
         psi = psi,
-        bfgs_param_set = bfgs_param_set,
-        bfgs_param_sets = bfgs_param_sets,
+        calibration_method = calibration_method,
+        calibration_params = calibration_params,
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
@@ -132,87 +130,6 @@ end
 # Child bounding
 # =============================================================================
 
-function _child_theta0(
-    n::Int,
-    F0::Vector{Int},
-    parent_keep::Vector{Int},
-    parent_gamma::Union{Nothing,Vector{Float64}};
-    relaxation::Symbol,
-    warm_start_parent_upsilon::Bool,
-)
-    if !warm_start_parent_upsilon || relaxation != :DDGFactplusUpsilon
-        return nothing
-    end
-
-    return _theta0_from_parent_gamma(
-        n,
-        F0,
-        parent_keep,
-        parent_gamma,
-    )
-end
-
-
-function _rebound_theta0(
-    n::Int,
-    F0f::Vector{Int},
-    r;
-    relaxation::Symbol,
-    warm_start_parent_upsilon::Bool,
-)
-    if !warm_start_parent_upsilon || relaxation != :DDGFactplusUpsilon
-        return nothing
-    end
-
-    return _theta0_from_current_gamma_after_fixing(
-        n,
-        F0f,
-        r.keep,
-        r.gamma,
-    )
-end
-
-
-function _child_fixed_gamma(
-    n::Int,
-    F0::Vector{Int},
-    parent_keep::Vector{Int},
-    parent_gamma::Union{Nothing,Vector{Float64}};
-    relaxation::Symbol,
-    reuse_parent_upsilon::Bool,
-)
-    if !reuse_parent_upsilon || relaxation != :DDGFactplusUpsilon
-        return nothing
-    end
-
-    return _gamma_from_parent_gamma(
-        n,
-        F0,
-        parent_keep,
-        parent_gamma,
-    )
-end
-
-
-function _rebound_fixed_gamma(
-    n::Int,
-    F0f::Vector{Int},
-    r;
-    relaxation::Symbol,
-    reuse_parent_upsilon::Bool,
-)
-    if !reuse_parent_upsilon || relaxation != :DDGFactplusUpsilon
-        return nothing
-    end
-
-    return _gamma_from_current_gamma_after_fixing(
-        n,
-        F0f,
-        r.keep,
-        r.gamma,
-    )
-end
-
 
 function _bound_child!(
     C::Symmetric,
@@ -220,41 +137,13 @@ function _bound_child!(
     t::Int,
     F1::Vector{Int},
     F0::Vector{Int},
-    parent_keep::Vector{Int},
-    parent_gamma::Union{Nothing,Vector{Float64}},
     open::Vector{GMESPNode},
     state::Base.RefValue,
     counters::Base.RefValue,
     node_kwargs;
-    relaxation::Symbol,
     fixing_rule::Symbol,
-    warm_start_parent_upsilon::Bool,
-    reuse_parent_upsilon::Bool,
     atol::Float64,
 )
-    n = size(C, 1)
-
-    fixed_upsilon_gamma = _child_fixed_gamma(
-        n,
-        F0,
-        parent_keep,
-        parent_gamma;
-        relaxation = relaxation,
-        reuse_parent_upsilon = reuse_parent_upsilon,
-    )
-
-    theta0 =
-        fixed_upsilon_gamma === nothing ?
-        _child_theta0(
-            n,
-            F0,
-            parent_keep,
-            parent_gamma;
-            relaxation = relaxation,
-            warm_start_parent_upsilon = warm_start_parent_upsilon,
-        ) :
-        nothing
-
     r = _gmesp_node(
         C,
         s,
@@ -262,8 +151,6 @@ function _bound_child!(
         F1,
         F0;
         node_kwargs...,
-        theta0 = theta0,
-        fixed_upsilon_gamma = fixed_upsilon_gamma,
     )
 
     cnt = counters[]
@@ -280,16 +167,24 @@ function _bound_child!(
     r.determined && return nothing
     r.ub ≤ st.lb && return nothing
 
-    F1f, F0f = variable_fixing_relaxation_soln(
-        F1,
-        F0,
-        r,
-        s,
-        t,
-        st.lb;
-        fixing_rule = fixing_rule,
-        tol = atol,
-    )
+    local F1f
+    local F0f
+
+    fixing_time = @elapsed begin
+        F1f, F0f = variable_fixing_relaxation_soln(
+            F1,
+            F0,
+            r,
+            s,
+            t,
+            st.lb;
+            fixing_rule = fixing_rule,
+            tol = atol,
+        )
+    end
+
+    _add_bnb_timing!(:variable_fixing_time, fixing_time)
+    _add_bnb_timing!(:variable_fixing_calls, 1.0)
 
     if length(F1f) > length(F1) || length(F0f) > length(F0)
         cnt = counters[]
@@ -300,25 +195,6 @@ function _bound_child!(
             nfix1 = cnt.nfix1 + length(F1f) - length(F1),
         )
 
-        fixed_upsilon_gamma_rebound = _rebound_fixed_gamma(
-            n,
-            F0f,
-            r;
-            relaxation = relaxation,
-            reuse_parent_upsilon = reuse_parent_upsilon,
-        )
-
-        theta0_rebound =
-            fixed_upsilon_gamma_rebound === nothing ?
-            _rebound_theta0(
-                n,
-                F0f,
-                r;
-                relaxation = relaxation,
-                warm_start_parent_upsilon = warm_start_parent_upsilon,
-            ) :
-            nothing
-
         r = _gmesp_node(
             C,
             s,
@@ -326,8 +202,6 @@ function _bound_child!(
             F1f,
             F0f;
             node_kwargs...,
-            theta0 = theta0_rebound,
-            fixed_upsilon_gamma = fixed_upsilon_gamma_rebound,
         )
 
         _register_integer_solution!(C, s, t, r, state)
@@ -362,31 +236,17 @@ end
 function _print_root_log(
     relaxation::Symbol,
     fixing_rule::Symbol,
-    root_bfgs_param_set::Symbol,
-    effective_root_bfgs_param_set::Symbol,
-    bfgs_param_set::Symbol,
-    root_psi0_warm_start::Bool,
-    root_psi0_bfgs_param_set::Symbol,
-    root_after_psi0_bfgs_param_set::Symbol,
+    calibration_method::Symbol,
     upsilon_fixing::Symbol,
-    warm_start_parent_upsilon::Bool,
-    reuse_parent_upsilon::Bool,
     lb::Float64,
     ub_root::Float64,
 )
     @printf(
-        "root:  relaxation = %s   fixing = %s   root_bfgs = %s   effective_root_bfgs = %s   node_bfgs = %s   root_psi0 = %s/%s   root_after_psi0 = %s   upsilon_fixing = %s   warm_start = %s   reuse_parent = %s   lb = %.4f   ub = %.4f   gap = %.4f\n",
+        "root:  relaxation = %s   fixing = %s   calibration = %s   upsilon_fixing = %s   lb = %.4f   ub = %.4f   gap = %.4f\n",
         String(relaxation),
         String(fixing_rule),
-        String(root_bfgs_param_set),
-        String(effective_root_bfgs_param_set),
-        String(bfgs_param_set),
-        string(root_psi0_warm_start),
-        String(root_psi0_bfgs_param_set),
-        String(root_after_psi0_bfgs_param_set),
+        String(calibration_method),
         String(upsilon_fixing),
-        string(warm_start_parent_upsilon),
-        string(reuse_parent_upsilon),
         lb,
         ub_root,
         ub_root - lb,
@@ -428,15 +288,8 @@ function _print_final_log(
     status::String,
     relaxation::Symbol,
     fixing_rule::Symbol,
-    root_bfgs_param_set::Symbol,
-    effective_root_bfgs_param_set::Symbol,
-    bfgs_param_set::Symbol,
-    root_psi0_warm_start::Bool,
-    root_psi0_bfgs_param_set::Symbol,
-    root_after_psi0_bfgs_param_set::Symbol,
+    calibration_method::Symbol,
     upsilon_fixing::Symbol,
-    warm_start_parent_upsilon::Bool,
-    reuse_parent_upsilon::Bool,
     nodes::Int,
     nfix0::Int,
     nfix1::Int,
@@ -448,19 +301,12 @@ function _print_final_log(
     int_gap_opt::Float64,
 )
     @printf(
-        "done [%s].  relaxation = %s   fixing = %s   root_bfgs = %s   effective_root_bfgs = %s   node_bfgs = %s   root_psi0 = %s/%s   root_after_psi0 = %s   upsilon_fixing = %s   warm_start = %s   reuse_parent = %s   nodes = %d   fix0 = %d  fix1 = %d   lb = %.4f   ub = %.4f   gap = %.4f\n",
+        "done [%s].  relaxation = %s   fixing = %s   calibration = %s   upsilon_fixing = %s   nodes = %d   fix0 = %d  fix1 = %d   lb = %.4f   ub = %.4f   gap = %.4f\n",
         status,
         String(relaxation),
         String(fixing_rule),
-        String(root_bfgs_param_set),
-        String(effective_root_bfgs_param_set),
-        String(bfgs_param_set),
-        string(root_psi0_warm_start),
-        String(root_psi0_bfgs_param_set),
-        String(root_after_psi0_bfgs_param_set),
+        String(calibration_method),
         String(upsilon_fixing),
-        string(warm_start_parent_upsilon),
-        string(reuse_parent_upsilon),
         nodes,
         nfix0,
         nfix1,
@@ -492,13 +338,9 @@ end
         C, s, t;
         relaxation = DDGFact,
         fixing_rule = :dual,
-        root_bfgs_param_set = :default,
-        root_after_psi0_bfgs_param_set = nothing,
-        bfgs_param_set = :default,
-        root_psi0_warm_start = false,
-        root_psi0_bfgs_param_set = nothing,
-        warm_start_parent_upsilon = true,
-        reuse_parent_upsilon = false,
+        calibration_method = :bfgs,
+        root_calibration_params = Dict{Symbol,Any}(),
+        node_calibration_params = Dict{Symbol,Any}(),
         ...
     )
 
@@ -508,28 +350,9 @@ Main options:
 
   - `relaxation = DDGFact`, `DDGFactplus`, or `DDGFactplusUpsilon`.
   - `fixing_rule = :none`, `:dual`, `:primal`, or `:both`.
-
-BFGS effort options:
-
-  - `root_bfgs_param_set` controls root Upsilon calibration when
-    `root_psi0_warm_start = false`.
-  - `root_psi0_bfgs_param_set` controls the first root calibration with
-    fixed `psi = 0` when `root_psi0_warm_start = true`.
-  - `root_after_psi0_bfgs_param_set` controls the second root calibration with
-    `psi = psi(gamma)` initialized from the `psi = 0` root solution when
-    `root_psi0_warm_start = true`.
-  - `bfgs_param_set` controls all non-root node calibrations.
-
-Warm start / reuse options:
-
-  - `root_psi0_warm_start = true` first calibrates root Upsilon with fixed
-    `psi = 0`, then uses the resulting `theta` as the start for the usual
-    root DDGFactplusUpsilon calibration with `psi = psi(gamma)`.
-  - `warm_start_parent_upsilon = true` initializes child-node Upsilon BFGS
-    from the parent.
-  - `reuse_parent_upsilon = true` skips child/rebound Upsilon BFGS and directly
-    reuses the parent/current gamma restricted to the child/rebound keep set.
-    In this case, `warm_start_parent_upsilon` is ignored for those nodes.
+  - `calibration_method = :bfgs`, `:rbfgs`, or `:prox_step` for DDGFactplusUpsilon.
+  - `root_calibration_params` controls root-node Upsilon calibration.
+  - `node_calibration_params` controls all child and rebound node calibrations.
 
 For `DDGFact`, only `fixing_rule = :none` and `fixing_rule = :dual` are supported.
 """
@@ -542,15 +365,10 @@ function solve_bnb_ddfact(
     psi::Union{Nothing,Float64} = nothing,
     time_limit::Real = 3600.0,
     verbose::Bool = true,
-    root_bfgs_param_set::Union{Nothing,Symbol} = nothing,
-    root_after_psi0_bfgs_param_set::Union{Nothing,Symbol} = nothing,
-    bfgs_param_set::Symbol = :default,
-    bfgs_param_sets::Dict = bfgs_param_sets,
-    root_psi0_warm_start::Bool = false,
-    root_psi0_bfgs_param_set::Union{Nothing,Symbol} = nothing,
+    calibration_method::Symbol = :bfgs,
+    root_calibration_params = Dict{Symbol,Any}(),
+    node_calibration_params = Dict{Symbol,Any}(),
     upsilon_fixing::Symbol = :simple,
-    warm_start_parent_upsilon::Bool = true,
-    reuse_parent_upsilon::Bool = false,
     atol::Float64 = 1e-8,
     psi_margin::Float64 = 1e-7,
     psi_floor::Float64 = 0.0,
@@ -561,46 +379,17 @@ function solve_bnb_ddfact(
 
     relaxation = _normalize_relaxation(relaxation)
     fixing_rule = _normalize_fixing_rule(fixing_rule)
-
-    root_bfgs_param_set =
-        root_bfgs_param_set === nothing ?
-        bfgs_param_set :
-        root_bfgs_param_set
-
-    root_psi0_bfgs_param_set =
-        root_psi0_bfgs_param_set === nothing ?
-        root_bfgs_param_set :
-        root_psi0_bfgs_param_set
-
-    root_after_psi0_bfgs_param_set =
-        root_after_psi0_bfgs_param_set === nothing ?
-        root_bfgs_param_set :
-        root_after_psi0_bfgs_param_set
-
-    effective_root_bfgs_param_set =
-        root_psi0_warm_start && relaxation == :DDGFactplusUpsilon ?
-        root_after_psi0_bfgs_param_set :
-        root_bfgs_param_set
+    calibration_method = _normalize_calibration_method(calibration_method)
 
     _validate_bnb_options(
         relaxation,
         fixing_rule,
         upsilon_fixing,
+        calibration_method,
     )
 
-    if reuse_parent_upsilon &&
-       warm_start_parent_upsilon &&
-       relaxation == :DDGFactplusUpsilon &&
-       verbose
-
-        println(
-            "reuse_parent_upsilon = true: child/rebound nodes reuse gamma directly; " *
-            "warm_start_parent_upsilon is ignored for those nodes.",
-        )
-        flush(stdout)
-    end
-
     _, lb0, S_inc0 = _initial_incumbent(C, s, t)
+    _reset_bnb_timing!()
 
     state = Ref((
         lb = lb0,
@@ -620,48 +409,25 @@ function solve_bnb_ddfact(
     root_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
-        bfgs_param_set = effective_root_bfgs_param_set,
-        bfgs_param_sets = bfgs_param_sets,
+        calibration_method = calibration_method,
+        calibration_params = root_calibration_params,
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
     )
 
-    node_kwargs = _make_node_kwargs(
+    child_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
-        bfgs_param_set = bfgs_param_set,
-        bfgs_param_sets = bfgs_param_sets,
+        calibration_method = calibration_method,
+        calibration_params = node_calibration_params,
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
     )
 
-    # ------------------------------------------------------------
-    # Optional root psi = 0 Upsilon warm start.
-    #
-    # This first solves the fixed-psi Upsilon calibration at the root.
-    # Then its theta is used as the initial point for the usual root
-    # DDGFactplusUpsilon calibration with psi = psi(gamma), using
-    # effective_root_bfgs_param_set.
-    # ------------------------------------------------------------
-    root_theta0, root_psi0_calib =
-        _root_theta0_from_psi0_warm_start(
-            C,
-            s,
-            t;
-            relaxation = relaxation,
-            root_psi0_warm_start = root_psi0_warm_start,
-            root_psi0_bfgs_param_set = root_psi0_bfgs_param_set,
-            bfgs_param_sets = bfgs_param_sets,
-            atol = atol,
-            verbose = verbose,
-        )
-
-    # Root node always solves/calibrates normally.
-    # reuse_parent_upsilon only applies to child/rebound nodes.
     r_root = _gmesp_node(
         C,
         s,
@@ -669,8 +435,6 @@ function solve_bnb_ddfact(
         Int[],
         Int[];
         root_node_kwargs...,
-        theta0 = root_theta0,
-        fixed_upsilon_gamma = nothing,
     )
 
     ub_root = r_root.ub
@@ -688,15 +452,8 @@ function solve_bnb_ddfact(
     verbose && _print_root_log(
         relaxation,
         fixing_rule,
-        root_bfgs_param_set,
-        effective_root_bfgs_param_set,
-        bfgs_param_set,
-        root_psi0_warm_start,
-        root_psi0_bfgs_param_set,
-        root_after_psi0_bfgs_param_set,
+        calibration_method,
         upsilon_fixing,
-        warm_start_parent_upsilon,
-        reuse_parent_upsilon,
         st.lb,
         ub_root,
     )
@@ -718,13 +475,23 @@ function solve_bnb_ddfact(
             break
         end
 
-        sort!(open; by = nd -> nd.ub, rev = true)
+        local node
 
-        st = state[]
+        open_list_time = @elapsed begin
+            sort!(open; by = nd -> nd.ub, rev = true)
 
-        first(open).ub ≤ st.lb && break
+            st = state[]
 
-        node = popfirst!(open)
+            if first(open).ub ≤ st.lb
+                node = nothing
+            else
+                node = popfirst!(open)
+            end
+        end
+
+        _add_bnb_timing!(:open_list_time, open_list_time)
+
+        node === nothing && break
 
         i = _branch_var(node.keep, node.x, node.F1)
         i == 0 && continue
@@ -739,16 +506,11 @@ function solve_bnb_ddfact(
             t,
             F1_child,
             node.F0,
-            node.keep,
-            node.gamma,
             open,
             state,
             counters,
-            node_kwargs;
-            relaxation = relaxation,
+            child_node_kwargs;
             fixing_rule = fixing_rule,
-            warm_start_parent_upsilon = warm_start_parent_upsilon,
-            reuse_parent_upsilon = reuse_parent_upsilon,
             atol = atol,
         )
 
@@ -762,16 +524,11 @@ function solve_bnb_ddfact(
             t,
             node.F1,
             F0_child,
-            node.keep,
-            node.gamma,
             open,
             state,
             counters,
-            node_kwargs;
-            relaxation = relaxation,
+            child_node_kwargs;
             fixing_rule = fixing_rule,
-            warm_start_parent_upsilon = warm_start_parent_upsilon,
-            reuse_parent_upsilon = reuse_parent_upsilon,
             atol = atol,
         )
 
@@ -813,15 +570,8 @@ function solve_bnb_ddfact(
         status,
         relaxation,
         fixing_rule,
-        root_bfgs_param_set,
-        effective_root_bfgs_param_set,
-        bfgs_param_set,
-        root_psi0_warm_start,
-        root_psi0_bfgs_param_set,
-        root_after_psi0_bfgs_param_set,
+        calibration_method,
         upsilon_fixing,
-        warm_start_parent_upsilon,
-        reuse_parent_upsilon,
         cnt.nodes,
         cnt.nfix0,
         cnt.nfix1,
@@ -832,6 +582,16 @@ function solve_bnb_ddfact(
         int_gap_avg,
         int_gap_opt,
     )
+
+    bnb_timing = _copy_bnb_timing()
+
+    dual_solution_time = get(bnb_timing, :dual_solution_time, 0.0)
+    variable_fixing_direct_time = get(bnb_timing, :variable_fixing_time, 0.0)
+
+    variable_fixing_total_time =
+        fixing_rule in (:dual, :both) ?
+        variable_fixing_direct_time + dual_solution_time :
+        variable_fixing_direct_time
 
     stats = (
         nodes = cnt.nodes,
@@ -850,19 +610,23 @@ function solve_bnb_ddfact(
         tree_exhausted = tree_exhausted,
         relaxation = relaxation,
         fixing_rule = fixing_rule,
-        root_bfgs_param_set = root_bfgs_param_set,
-        effective_root_bfgs_param_set = effective_root_bfgs_param_set,
-        bfgs_param_set = bfgs_param_set,
-        root_psi0_warm_start = root_psi0_warm_start,
-        root_psi0_bfgs_param_set = root_psi0_bfgs_param_set,
-        root_after_psi0_bfgs_param_set = root_after_psi0_bfgs_param_set,
-        root_psi0_obj =
-            root_psi0_calib === nothing ? NaN : root_psi0_calib.obj,
-        root_psi0_improved =
-            root_psi0_calib === nothing ? missing : root_psi0_calib.improved,
+        calibration_method = calibration_method,
         upsilon_fixing = upsilon_fixing,
-        warm_start_parent_upsilon = warm_start_parent_upsilon,
-        reuse_parent_upsilon = reuse_parent_upsilon,
+        root_calibration_params = root_calibration_params,
+        node_calibration_params = node_calibration_params,
+
+        knitro_time = get(bnb_timing, :knitro_time, 0.0),
+        relaxation_solve_time = get(bnb_timing, :relaxation_solve_time, 0.0),
+        upsilon_calibration_time = get(bnb_timing, :upsilon_calibration_time, 0.0),
+        factorization_time = get(bnb_timing, :factorization_time, 0.0),
+        bound_computation_time = get(bnb_timing, :bound_computation_time, 0.0),
+        open_list_time = get(bnb_timing, :open_list_time, 0.0),
+        node_setup_time = get(bnb_timing, :node_setup_time, 0.0),
+
+        dual_solution_time = dual_solution_time,
+        variable_fixing_direct_time = variable_fixing_direct_time,
+        variable_fixing_time = variable_fixing_total_time,
+        variable_fixing_calls = Int(round(get(bnb_timing, :variable_fixing_calls, 0.0))),
     )
 
     return st.S_inc, stats

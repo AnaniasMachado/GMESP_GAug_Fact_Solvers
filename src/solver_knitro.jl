@@ -305,6 +305,106 @@ function aug_ddfact_gmesp(
 end
 
 
+function _aug_ddfact_upsilon_unique_feasible_solution(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    gamma::Vector{Float64},
+    s::Integer,
+    t::Integer,
+    psi::Float64,
+    J1::Vector{Int},
+    Jfree::Vector{Int},
+    log_gamma::Vector{Float64};
+    atol = 1e-10,
+)
+    n = size(C, 1)
+
+    remaining = s - length(J1)
+
+    # Not a determined cardinality case.
+    if !(remaining == 0 || remaining == length(Jfree))
+        return nothing
+    end
+
+    x_val = zeros(n)
+
+    if remaining == 0
+        x_val[J1] .= 1.0
+    else
+        x_val[J1] .= 1.0
+        x_val[Jfree] .= 1.0
+    end
+
+    selected = findall(x_val .> 0.5)
+
+    if length(selected) != s
+        error("Internal error in unique feasible Upsilon case: selected set has wrong size.")
+    end
+
+    # The y-subproblem is linear:
+    #
+    #     maximize  - sum_i log(gamma_i) y_i
+    #     s.t.      sum_i y_i = t,
+    #               0 <= y_i <= x_i.
+    #
+    # For binary x, this sets y_i = 1 on the t selected indices
+    # with smallest log(gamma_i).
+    y_val = zeros(n)
+    y_order = sort(selected; by = i -> log_gamma[i])
+    y_val[y_order[1:t]] .= 1.0
+
+    y_part = sum(log_gamma[i] * y_val[i] for i in 1:n)
+
+    if t == 1
+        cdiag = collect(diag(C))
+        d = gamma .* cdiag .- psi
+        denom = dot(x_val, d) + psi
+
+        if denom <= atol
+            error("Invalid determined t=1 Upsilon denominator: denom = $denom")
+        end
+
+        obj_val = log(denom) - y_part
+
+        return (
+            x = x_val,
+            y = y_val,
+            obj = obj_val,
+        )
+    else
+        Fg = scaled_factorize_matrix(
+            C,
+            gamma,
+            psi;
+            atol = atol,
+        )
+
+        I_t = zeros(n)
+        I_t[1:t] .= 1.0
+
+        # Since x is binary, Fg' * diagm(x) * Fg can be computed by
+        # selecting the active rows.
+        X = Fg[selected, :]' * Fg[selected, :]
+        X = Symmetric(0.5 * (X + X'))
+
+        λ = eigen(X).values
+        λ = reverse(λ) + psi * I_t
+
+        iota, mid_val = find_iota(λ, t)
+
+        fval = iota == 0 ? 0.0 : sum(log, @view λ[1:iota])
+        fval += (t - iota) * log(mid_val)
+
+        obj_val = fval - y_part
+
+        return (
+            x = x_val,
+            y = y_val,
+            obj = obj_val,
+        )
+    end
+end
+
+
 function aug_ddfact_upsilon_gmesp(
     C::Symmetric{<:Real,<:AbstractMatrix},
     gamma::Vector{Float64},
@@ -327,6 +427,22 @@ function aug_ddfact_upsilon_gmesp(
     Jfree = setdiff(1:n, J1)
 
     log_gamma = log.(gamma)
+
+    unique_sol = _aug_ddfact_upsilon_unique_feasible_solution(
+        C,
+        gamma,
+        s,
+        t,
+        psi,
+        J1,
+        Jfree,
+        log_gamma;
+        atol = atol,
+    )
+
+    if unique_sol !== nothing
+        return unique_sol.x, unique_sol.y, unique_sol.obj
+    end
 
     model = Model(KNITRO.Optimizer)
     add_knitro_options!(model)
