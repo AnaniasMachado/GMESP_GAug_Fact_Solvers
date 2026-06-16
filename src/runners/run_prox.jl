@@ -23,14 +23,14 @@ include("var_fixing.jl")
 # Problem data
 # ============================================================
 
-n = 63
-kappa = 1
+n = 124
+kappa = 5
 
 # Full run:
-# s_vals = [s for s in (kappa + 1):(n - 1)]
+s_vals = [s for s in (kappa + 1):(n - 1)]
 
 # Test run:
-s_vals = [s for s in (kappa + 1):(kappa + 5)]
+# s_vals = [s for s in (kappa + 1):(kappa + 5)]
 
 matfile = matopen("data/data$n.mat")
 C = n == 63 ? read(matfile, "A") : read(matfile, "C")
@@ -109,7 +109,7 @@ verbose_prox = true
 # ============================================================
 
 solver = "knitro"
-calib_method = "bfgs_one_step_prox_knitro"
+calib_method = "bfgs_prox_knitro"
 
 mkpath("results")
 

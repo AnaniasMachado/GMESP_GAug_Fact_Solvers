@@ -1,0 +1,16 @@
+\begin{table}[!ht]
+\centering
+\footnotesize
+\caption{Main branch-and-bound results for $n = 32$ and $\kappa = unknown$.}
+\label{tab:bnb_main_results_n32_kappaunknown}
+\begin{tabular}{rrrrlrrrrrrr}
+\hline
+\textbf{data\_n} & \textbf{$n$} & \textbf{$s$} & \textbf{$t$} & \textbf{Method} & \textbf{Root gap} & \textbf{Runtime} & \textbf{Knitro time} & \textbf{Nodes} & \textbf{Fixed vars.} & \textbf{Max int. gap} & \textbf{Avg int. gap} \
+\hline
+63 & 32 & 16 & 15 & BFGS & 0.153764 & 839.288 & 794.144 & 431 & 769 & 0.380965 & 0.092022 \\
+63 & 32 & 16 & 15 & DDGFact & 0.690575 & 848.692 & 783.789 & 151519 & 411507 & 0.836238 & 0.691223 \\
+63 & 32 & 16 & 15 & DDGFact$^+$ & 0.276992 & 3.760 & 3.313 & 409 & 591 & 0.344370 & 0.218216 \\
+63 & 32 & 16 & 15 & Prox Knitro & 0.155383 & 381.688 & 357.820 & 321 & 327 & 0.277675 & 0.055012 \\
+\hline
+\end{tabular}
+\end{table}

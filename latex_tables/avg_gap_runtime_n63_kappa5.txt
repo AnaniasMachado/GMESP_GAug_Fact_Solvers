@@ -1,0 +1,16 @@
+\begin{table}[!ht]
+\centering
+\footnotesize
+\caption{Average gap and runtime for each upper bound for $n = 63$ and $\kappa = 5$.}
+\label{tab:avg_gap_runtime_n63_kappa5}
+\begin{tabular}{lrr}
+\hline
+\textbf{Upper bound} & \textbf{Average gap} & \textbf{Average runtime (s)} \
+\hline
+DDGFact & 3.018110 & 0.050 \\
+DDGFact$^+$ & 1.415078 & 0.038 \\
+DDGFact$^+_\Upsilon$ BFGS & 0.965004 & 30.347 \\
+DDGFact$^+_\Upsilon$ Prox Knitro & 0.938367 & 13.520 \\
+\hline
+\end{tabular}
+\end{table}
