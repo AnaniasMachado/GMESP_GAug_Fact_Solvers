@@ -6,16 +6,19 @@
 #
 # This solves a sequence of proximal subproblems:
 #
-#     minimize_theta  V(theta) + (rho / 2) * ||theta - theta_center||^2
+#     minimize_theta  V(theta) + (1 / (2 * rho)) * ||theta - theta_center||^2
 #
 # where V(theta) is the original DDGFact+_Upsilon calibration value:
 #
 #     V(theta) = DDGFact+_Upsilon(C, s, t; gamma = exp(theta), psi(theta))
 #
-# Each evaluation of V(theta) and grad V(theta) calls the original spectral
-# oracle:
+# Each evaluation of V(theta) calls:
 #
-#     eval_ddfactplus_upsilon_calibration(...)
+#     eval_ddfactplus_upsilon_calibration_objective(...)
+#
+# The subgradient is computed lazily, only when needed, using:
+#
+#     eval_ddfactplus_upsilon_calibration_subgradient(...)
 #
 # The proximal subproblem is solved only with Knitro.
 #
@@ -47,57 +50,98 @@ function _prox_sym(C)
 end
 
 
-function _prox_project_q(q::Vector{Float64}, q_bound::Float64)
-    if isfinite(q_bound)
-        return clamp.(q, -q_bound, q_bound)
+function _prox_project_theta(theta::Vector{Float64}, theta_bound::Float64)
+    if isfinite(theta_bound)
+        return clamp.(theta, -theta_bound, theta_bound)
     else
-        return copy(q)
+        return copy(theta)
     end
 end
 
 
-function _prox_cache_key(q::Vector{Float64}; digits::Int = 12)
-    return join(string.(round.(q; digits = digits)), ",")
+function _prox_cache_key(theta::Vector{Float64}; digits::Int = 12)
+    return join(string.(round.(theta; digits = digits)), ",")
 end
+
+
+mutable struct ProxOracleValue
+    obj::Float64
+    g::Union{Nothing,Vector{Float64}}
+    gamma::Vector{Float64}
+    psi::Float64
+    lambda_min::Float64
+    x::Vector{Float64}
+    y::Vector{Float64}
+    theta::Vector{Float64}
+end
+
+
+mutable struct ProxEvalCounters
+    num_objective_oracle_requests::Int
+    num_objective_cache_hits::Int
+    num_objective_solves::Int
+    num_subgradient_requests::Int
+    num_subgradient_cache_hits::Int
+    num_subgradient_evals::Int
+end
+
+
+ProxEvalCounters() = ProxEvalCounters(0, 0, 0, 0, 0, 0)
 
 
 function _prox_eval_original_oracle(
     C::Symmetric{<:Real,<:AbstractMatrix},
-    q::Vector{Float64},
+    theta::Vector{Float64},
     s::Int,
     t::Int;
     J1::AbstractVector{<:Integer},
     J0::AbstractVector{<:Integer},
     atol::Float64,
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
     psi_margin::Float64,
     psi_floor::Float64,
-    psi_derivative::Bool,
     t1_reformulation::Bool,
-)
-    obj, g, gamma, psi, lambda_min, x, y =
-        eval_ddfactplus_upsilon_calibration(
-            C,
-            q,
-            s,
-            t;
-            J1 = J1,
-            J0 = J0,
-            atol = atol,
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-            psi_derivative = psi_derivative,
-            t1_reformulation = t1_reformulation,
-        )
+    counters::Union{Nothing,ProxEvalCounters} = nothing,
 
-    return (
-        obj = Float64(obj),
-        g = Vector{Float64}(g),
-        gamma = Vector{Float64}(gamma),
-        psi = Float64(psi),
-        lambda_min = Float64(lambda_min),
-        x = Vector{Float64}(x),
-        y = Vector{Float64}(y),
-        q = copy(q),
+    # DDGFact+_Upsilon relaxation solver tolerances.
+    relax_knitro_outlev::Union{Nothing,Int} = nothing,
+    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
+    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
+)
+    val = eval_ddfactplus_upsilon_calibration_objective(
+        C,
+        theta,
+        s,
+        t;
+        J1 = J1,
+        J0 = J0,
+        atol = atol,
+        x0 = x0,
+        y0 = y0,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        t1_reformulation = t1_reformulation,
+
+        # DDGFact+_Upsilon relaxation solver tolerances.
+        knitro_outlev = relax_knitro_outlev,
+        knitro_opttol = relax_knitro_opttol,
+        knitro_feastol = relax_knitro_feastol,
+    )
+
+    if counters !== nothing
+        counters.num_objective_solves += 1
+    end
+
+    return ProxOracleValue(
+        Float64(val.obj),
+        nothing,
+        Vector{Float64}(val.gamma),
+        Float64(val.psi),
+        Float64(val.λmin),
+        Vector{Float64}(val.x),
+        Vector{Float64}(val.y),
+        copy(theta),
     )
 end
 
@@ -105,7 +149,7 @@ end
 function _prox_eval_original_oracle_cached!(
     cache::Dict{String,Any},
     C::Symmetric{<:Real,<:AbstractMatrix},
-    q::Vector{Float64},
+    theta::Vector{Float64},
     s::Int,
     t::Int;
     J1::AbstractVector{<:Integer},
@@ -113,33 +157,102 @@ function _prox_eval_original_oracle_cached!(
     atol::Float64,
     psi_margin::Float64,
     psi_floor::Float64,
-    psi_derivative::Bool,
     t1_reformulation::Bool,
     cache_digits::Int,
+    counters::Union{Nothing,ProxEvalCounters} = nothing,
+    warm_start_state = nothing,
+    relax_knitro_outlev::Union{Nothing,Int} = nothing,
+    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
+    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
 )
-    q_eval = copy(q)
-    key = _prox_cache_key(q_eval; digits = cache_digits)
+    theta_val = copy(theta)
+    key = _prox_cache_key(theta_val; digits = cache_digits)
+
+    if counters !== nothing
+        counters.num_objective_oracle_requests += 1
+    end
 
     if haskey(cache, key)
+        if counters !== nothing
+            counters.num_objective_cache_hits += 1
+        end
+
         return cache[key]
     end
 
+    x0 = warm_start_state === nothing ? nothing : warm_start_state.x0[]
+    y0 = warm_start_state === nothing ? nothing : warm_start_state.y0[]
+
     val = _prox_eval_original_oracle(
         C,
-        q_eval,
+        theta_val,
         s,
         t;
         J1 = J1,
         J0 = J0,
         atol = atol,
+        x0 = x0,
+        y0 = y0,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
+        counters = counters,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
+
+    if warm_start_state !== nothing
+        warm_start_state.x0[] = copy(val.x)
+        warm_start_state.y0[] = copy(val.y)
+    end
 
     cache[key] = val
     return val
+end
+
+
+function _prox_get_subgradient!(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    val::ProxOracleValue,
+    s::Int,
+    t::Int;
+    atol::Float64,
+    psi_margin::Float64,
+    psi_floor::Float64,
+    psi_derivative::Bool,
+    counters::Union{Nothing,ProxEvalCounters} = nothing,
+)
+    if counters !== nothing
+        counters.num_subgradient_requests += 1
+    end
+
+    if val.g !== nothing
+        if counters !== nothing
+            counters.num_subgradient_cache_hits += 1
+        end
+
+        return val.g::Vector{Float64}
+    end
+
+    val.g = Vector{Float64}(
+        eval_ddfactplus_upsilon_calibration_subgradient(
+            C,
+            val,
+            s,
+            t;
+            atol = atol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = psi_derivative,
+        ),
+    )
+
+    if counters !== nothing
+        counters.num_subgradient_evals += 1
+    end
+
+    return val.g::Vector{Float64}
 end
 
 
@@ -183,10 +296,10 @@ end
 function _prox_projected_gradient_residual(
     theta::Vector{Float64},
     grad::Vector{Float64},
-    q_bound::Float64,
+    theta_bound::Float64,
 )
-    if isfinite(q_bound)
-        projected = clamp.(theta .- grad, -q_bound, q_bound)
+    if isfinite(theta_bound)
+        projected = clamp.(theta .- grad, -theta_bound, theta_bound)
         residual = theta .- projected
         return norm(residual), norm(residual, Inf), residual
     else
@@ -205,15 +318,20 @@ function _prox_eval_prox_point!(
     J1::AbstractVector{<:Integer},
     J0::AbstractVector{<:Integer},
     rho::Float64,
-    q_bound::Float64,
+    theta_bound::Float64,
     atol::Float64,
     psi_margin::Float64,
     psi_floor::Float64,
     psi_derivative::Bool,
     t1_reformulation::Bool,
     cache_digits::Int,
+    counters::Union{Nothing,ProxEvalCounters} = nothing,
+    warm_start_state = nothing,
+    relax_knitro_outlev::Union{Nothing,Int} = nothing,
+    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
+    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
 )
-    theta_eval = _prox_project_q(theta, q_bound)
+    theta_eval = _prox_project_theta(theta, theta_bound)
 
     val = _prox_eval_original_oracle_cached!(
         cache,
@@ -226,19 +344,35 @@ function _prox_eval_prox_point!(
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+        warm_start_state = warm_start_state,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
 
-    prox_grad = val.g .+ rho .* (theta_eval .- theta_center)
+    g = _prox_get_subgradient!(
+        C,
+        val,
+        s,
+        t;
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
+        counters = counters,
+    )
+
+    prox_grad = g .+ (1.0 / rho) .* (theta_eval .- theta_center)
 
     prox_obj =
         val.obj +
-        0.5 * rho * sum((theta_eval[i] - theta_center[i])^2 for i in eachindex(theta_eval))
+        (0.5 / rho) * sum((theta_eval[i] - theta_center[i])^2 for i in eachindex(theta_eval))
 
     res_norm, res_norm_inf, res_vec =
-        _prox_projected_gradient_residual(theta_eval, prox_grad, q_bound)
+        _prox_projected_gradient_residual(theta_eval, prox_grad, theta_bound)
 
     return (
         theta = theta_eval,
@@ -265,13 +399,14 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
     J1::AbstractVector{<:Integer},
     J0::AbstractVector{<:Integer},
     rho::Float64,
-    q_bound::Float64,
+    theta_bound::Float64,
     atol::Float64,
     psi_margin::Float64,
     psi_floor::Float64,
     psi_derivative::Bool,
     t1_reformulation::Bool,
     cache_digits::Int,
+    counters::Union{Nothing,ProxEvalCounters},
 
     # Knitro stopping tolerances.
     knitro_feastol::Float64,
@@ -284,9 +419,19 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
     knitro_honorbnds::Union{Nothing,Int},
     knitro_outlev::Int,
 
+    # DDGFact+_Upsilon relaxation solver tolerances.
+    relax_knitro_outlev::Union{Nothing,Int},
+    relax_knitro_opttol::Union{Nothing,Float64},
+    relax_knitro_feastol::Union{Nothing,Float64},
+
     verbose::Bool,
 )
     n = length(theta_center)
+
+    warm_start_state = (
+        x0 = Ref{Union{Nothing,Vector{Float64}}}(nothing),
+        y0 = Ref{Union{Nothing,Vector{Float64}}}(nothing),
+    )
 
     model = Model(KNITRO.Optimizer)
     add_knitro_options!(model)
@@ -325,27 +470,27 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
         _prox_set_knitro_attribute!(model, "outlev", knitro_outlev; verbose = verbose)
     end
 
-    if isfinite(q_bound)
-        @variable(model, -q_bound <= q[1:n] <= q_bound)
+    if isfinite(theta_bound)
+        @variable(model, -theta_bound <= theta_var[1:n] <= theta_bound)
     else
-        @variable(model, q[1:n])
+        @variable(model, theta_var[1:n])
     end
 
     for i in 1:n
-        set_start_value(q[i], theta_center[i])
+        set_start_value(theta_var[i], theta_center[i])
     end
 
-    function prox_value_f(qvals...)
-        qvec = collect(qvals)
+    function prox_value_f(thetavals...)
+        thetavec = collect(thetavals)
 
-        if isfinite(q_bound)
-            qvec .= clamp.(qvec, -q_bound, q_bound)
+        if isfinite(theta_bound)
+            thetavec .= clamp.(thetavec, -theta_bound, theta_bound)
         end
 
         val = _prox_eval_original_oracle_cached!(
             cache,
             C,
-            qvec,
+            thetavec,
             s,
             t;
             J1 = J1,
@@ -353,28 +498,32 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
             atol = atol,
             psi_margin = psi_margin,
             psi_floor = psi_floor,
-            psi_derivative = psi_derivative,
             t1_reformulation = t1_reformulation,
             cache_digits = cache_digits,
+            counters = counters,
+            warm_start_state = warm_start_state,
+            relax_knitro_outlev = relax_knitro_outlev,
+            relax_knitro_opttol = relax_knitro_opttol,
+            relax_knitro_feastol = relax_knitro_feastol,
         )
 
         prox_term =
-            0.5 * rho * sum((qvec[i] - theta_center[i])^2 for i in 1:n)
+            (0.5 / rho) * sum((thetavec[i] - theta_center[i])^2 for i in 1:n)
 
         return val.obj + prox_term
     end
 
-    function prox_value_grad!(gout, qvals...)
-        qvec = collect(qvals)
+    function prox_value_grad!(gout, thetavals...)
+        thetavec = collect(thetavals)
 
-        if isfinite(q_bound)
-            qvec .= clamp.(qvec, -q_bound, q_bound)
+        if isfinite(theta_bound)
+            thetavec .= clamp.(thetavec, -theta_bound, theta_bound)
         end
 
         val = _prox_eval_original_oracle_cached!(
             cache,
             C,
-            qvec,
+            thetavec,
             s,
             t;
             J1 = J1,
@@ -382,13 +531,29 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
             atol = atol,
             psi_margin = psi_margin,
             psi_floor = psi_floor,
-            psi_derivative = psi_derivative,
             t1_reformulation = t1_reformulation,
             cache_digits = cache_digits,
+            counters = counters,
+            warm_start_state = warm_start_state,
+            relax_knitro_outlev = relax_knitro_outlev,
+            relax_knitro_opttol = relax_knitro_opttol,
+            relax_knitro_feastol = relax_knitro_feastol,
+        )
+
+        g = _prox_get_subgradient!(
+            C,
+            val,
+            s,
+            t;
+            atol = atol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = psi_derivative,
+            counters = counters,
         )
 
         for i in 1:n
-            gout[i] = val.g[i] + rho * (qvec[i] - theta_center[i])
+            gout[i] = g[i] + (thetavec[i] - theta_center[i]) / rho
         end
 
         return nothing
@@ -402,7 +567,7 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
         prox_value_grad!,
     )
 
-    @NLobjective(model, Min, original_upsilon_prox_value(q...))
+    @NLobjective(model, Min, original_upsilon_prox_value(theta_var...))
 
     optimize!(model)
 
@@ -416,10 +581,10 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
         )
     end
 
-    theta_new = value.(q)
+    theta_new = value.(theta_var)
 
-    if isfinite(q_bound)
-        theta_new .= clamp.(theta_new, -q_bound, q_bound)
+    if isfinite(theta_bound)
+        theta_new .= clamp.(theta_new, -theta_bound, theta_bound)
     end
 
     eval_new = _prox_eval_prox_point!(
@@ -432,13 +597,18 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
         J1 = J1,
         J0 = J0,
         rho = rho,
-        q_bound = q_bound,
+        theta_bound = theta_bound,
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+        warm_start_state = warm_start_state,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
 
     return (
@@ -468,7 +638,6 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     J1::AbstractVector{<:Integer} = Int[],
     J0::AbstractVector{<:Integer} = Int[],
     theta0::Union{Nothing,Vector{Float64}} = nothing,
-    q0::Union{Nothing,Vector{Float64}} = nothing,
 
     # Proximal parameter.
     rho::Float64 = 1e-2,
@@ -478,7 +647,7 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     center_initial_theta::Bool = false,
 
     # Bounds.
-    q_bound::Float64 = 20.0,
+    theta_bound::Float64 = 20.0,
 
     # Original DDGFact+_Upsilon oracle options.
     psi_margin::Float64 = 1e-8,
@@ -486,6 +655,11 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     psi_derivative::Bool = true,
     t1_reformulation::Bool = true,
     atol::Float64 = 1e-10,
+
+    # DDGFact+_Upsilon relaxation solver tolerances.
+    relax_knitro_outlev::Union{Nothing,Int} = nothing,
+    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
+    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
 
     # Knitro subproblem tolerances.
     knitro_feastol::Float64 = 1e-8,
@@ -519,8 +693,6 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
 
     theta_center = if theta0 !== nothing
         copy(theta0)
-    elseif q0 !== nothing
-        copy(q0)
     elseif theta_perturbation == 0.0
         zeros(n)
     else
@@ -528,16 +700,17 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     end
 
     if length(theta_center) != n
-        error("theta0/q0 must have length equal to size(C, 1).")
+        error("theta0 must have length equal to size(C, 1).")
     end
 
     if center_initial_theta
         theta_center .-= mean(theta_center)
     end
 
-    theta_center = _prox_project_q(theta_center, q_bound)
+    theta_center = _prox_project_theta(theta_center, theta_bound)
 
     cache = Dict{String,Any}()
+    counters = ProxEvalCounters()
 
     unscaled_val = _prox_eval_original_oracle_cached!(
         cache,
@@ -550,9 +723,12 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
 
     initial_val = _prox_eval_original_oracle_cached!(
@@ -566,21 +742,36 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
 
     label = "OneStep-Prox-Knitro-Upsilon"
 
     if verbose
+        initial_g = _prox_get_subgradient!(
+            Csym,
+            initial_val,
+            s,
+            t;
+            atol = atol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = psi_derivative,
+            counters = counters,
+        )
+
         @printf(
             "%s init | obj = %.12e | unscaled = %.12e | psi = %.6e | ||grad V|| = %.3e | gamma [%.4e, %.4e]\n",
             label,
             initial_val.obj,
             unscaled_val.obj,
             initial_val.psi,
-            norm(initial_val.g),
+            norm(initial_g),
             minimum(initial_val.gamma),
             maximum(initial_val.gamma),
         )
@@ -596,13 +787,18 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
         J1 = J1,
         J0 = J0,
         rho = rho,
-        q_bound = q_bound,
+        theta_bound = theta_bound,
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
 
         knitro_feastol = knitro_feastol,
         knitro_opttol = knitro_opttol,
@@ -624,8 +820,20 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     step_norm = norm(step_vec)
     step_norm_inf = norm(step_vec, Inf)
 
-    final_original_grad_norm = norm(final_val.g)
-    final_original_grad_norm_inf = norm(final_val.g, Inf)
+    final_g = _prox_get_subgradient!(
+        Csym,
+        final_val,
+        s,
+        t;
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
+        counters = counters,
+    )
+
+    final_original_grad_norm = norm(final_g)
+    final_original_grad_norm_inf = norm(final_g, Inf)
 
     hist = diagnostics ? Any[] : nothing
 
@@ -652,6 +860,27 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
                 subproblem_residual_norm = sub.residual_norm,
                 subproblem_residual_norm_inf = sub.residual_norm_inf,
                 cache_size = length(cache),
+                num_objective_solves = counters.num_objective_solves,
+                num_subgradient_evals = counters.num_subgradient_evals,
+                num_objective_oracle_requests =
+                    counters.num_objective_oracle_requests,
+                num_objective_cache_hits =
+                    counters.num_objective_cache_hits,
+                objective_cache_hit_rate =
+                    counters.num_objective_oracle_requests == 0 ?
+                    0.0 :
+                    counters.num_objective_cache_hits /
+                    counters.num_objective_oracle_requests,
+
+                num_subgradient_requests =
+                    counters.num_subgradient_requests,
+                num_subgradient_cache_hits =
+                    counters.num_subgradient_cache_hits,
+                subgradient_cache_hit_rate =
+                    counters.num_subgradient_requests == 0 ?
+                    0.0 :
+                    counters.num_subgradient_cache_hits /
+                    counters.num_subgradient_requests,
             ),
         )
     end
@@ -672,7 +901,7 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
 
     if verbose
         @printf(
-            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | prox_obj = %.12e | psi = %.6e | ||grad V|| = %.3e | step = %.3e | step_inf = %.3e | subres_inf = %.3e | sub_ok = %s | status = %s | gamma [%.4e, %.4e] | cache = %d\n",
+            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | prox_obj = %.12e | psi = %.6e | ||grad V|| = %.3e | step = %.3e | step_inf = %.3e | subres_inf = %.3e | sub_ok = %s | status = %s | gamma [%.4e, %.4e] | cache = %d | obj_solves = %d | grad_evals = %d\n",
             label,
             final_val.obj,
             unscaled_val.obj,
@@ -688,6 +917,8 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
             minimum(final_val.gamma),
             maximum(final_val.gamma),
             length(cache),
+            counters.num_objective_solves,
+            counters.num_subgradient_evals,
         )
         flush(stdout)
     end
@@ -695,7 +926,6 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     return (
         gamma = final_val.gamma,
         theta = final_theta,
-        q = final_theta,
         psi = final_val.psi,
         lambda_min = final_val.lambda_min,
         x = final_val.x,
@@ -704,7 +934,6 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
         obj = final_val.obj,
 
         best_ub = final_val.obj,
-        best_q = final_theta,
         best_gamma = final_val.gamma,
         best_psi = final_val.psi,
         best_lambda_min_S = final_val.lambda_min,
@@ -712,7 +941,6 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
         best_max_gamma = maximum(final_val.gamma),
 
         best_eval = final_val,
-        final_q = final_theta,
         final_eval = final_val,
         history = hist,
         status_history = status_history,
@@ -728,7 +956,27 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
         improved = final_val.obj < unscaled_val.obj,
 
         cache_size = length(cache),
-        num_evals = length(cache),
+        num_objective_solves = counters.num_objective_solves,
+        num_subgradient_evals = counters.num_subgradient_evals,
+        num_objective_oracle_requests =
+            counters.num_objective_oracle_requests,
+        num_objective_cache_hits =
+            counters.num_objective_cache_hits,
+        objective_cache_hit_rate =
+            counters.num_objective_oracle_requests == 0 ?
+            0.0 :
+            counters.num_objective_cache_hits /
+            counters.num_objective_oracle_requests,
+
+        num_subgradient_requests =
+            counters.num_subgradient_requests,
+        num_subgradient_cache_hits =
+            counters.num_subgradient_cache_hits,
+        subgradient_cache_hit_rate =
+            counters.num_subgradient_requests == 0 ?
+            0.0 :
+            counters.num_subgradient_cache_hits /
+            counters.num_subgradient_requests,
         prox_iters = 1,
         rho = rho,
         prox_subproblem_solver = :knitro_one_step,
@@ -765,7 +1013,6 @@ function solve_proximal_knitro_upsilon_calibration(
     J1::AbstractVector{<:Integer} = Int[],
     J0::AbstractVector{<:Integer} = Int[],
     theta0::Union{Nothing,Vector{Float64}} = nothing,
-    q0::Union{Nothing,Vector{Float64}} = nothing,
 
     # Proximal parameter.
     rho::Float64 = 1e-2,
@@ -782,7 +1029,7 @@ function solve_proximal_knitro_upsilon_calibration(
     center_initial_theta::Bool = false,
 
     # Bounds.
-    q_bound::Float64 = 20.0,
+    theta_bound::Float64 = 20.0,
 
     # Original DDGFact+_Upsilon oracle options.
     psi_margin::Float64 = 1e-8,
@@ -790,6 +1037,11 @@ function solve_proximal_knitro_upsilon_calibration(
     psi_derivative::Bool = true,
     t1_reformulation::Bool = true,
     atol::Float64 = 1e-10,
+
+    # DDGFact+_Upsilon relaxation solver tolerances.
+    relax_knitro_outlev::Union{Nothing,Int} = nothing,
+    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
+    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
 
     # Knitro subproblem tolerances.
     knitro_feastol::Float64 = 1e-8,
@@ -825,8 +1077,6 @@ function solve_proximal_knitro_upsilon_calibration(
 
     theta = if theta0 !== nothing
         copy(theta0)
-    elseif q0 !== nothing
-        copy(q0)
     elseif theta_perturbation == 0.0
         zeros(n)
     else
@@ -834,16 +1084,17 @@ function solve_proximal_knitro_upsilon_calibration(
     end
 
     if length(theta) != n
-        error("theta0/q0 must have length equal to size(C, 1).")
+        error("theta0 must have length equal to size(C, 1).")
     end
 
     if center_initial_theta
         theta .-= mean(theta)
     end
 
-    theta = _prox_project_q(theta, q_bound)
+    theta = _prox_project_theta(theta, theta_bound)
 
     cache = Dict{String,Any}()
+    counters = ProxEvalCounters()
 
     unscaled_val = _prox_eval_original_oracle_cached!(
         cache,
@@ -856,9 +1107,12 @@ function solve_proximal_knitro_upsilon_calibration(
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
 
     current_val = _prox_eval_original_oracle_cached!(
@@ -872,9 +1126,12 @@ function solve_proximal_knitro_upsilon_calibration(
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
+        counters = counters,
+        relax_knitro_outlev = relax_knitro_outlev,
+        relax_knitro_opttol = relax_knitro_opttol,
+        relax_knitro_feastol = relax_knitro_feastol,
     )
 
     best_val = current_val
@@ -893,8 +1150,22 @@ function solve_proximal_knitro_upsilon_calibration(
     last_prox_obj_change = Inf
     last_step_norm = Inf
     last_step_norm_inf = Inf
-    last_original_grad_norm = norm(current_val.g)
-    last_original_grad_norm_inf = norm(current_val.g, Inf)
+
+    current_g = _prox_get_subgradient!(
+        Csym,
+        current_val,
+        s,
+        t;
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
+        counters = counters,
+    )
+
+    last_original_grad_norm = norm(current_g)
+    last_original_grad_norm_inf = norm(current_g, Inf)
+
     last_inner_iters = 0
     last_subproblem_residual_norm = Inf
     last_subproblem_residual_norm_inf = Inf
@@ -935,13 +1206,18 @@ function solve_proximal_knitro_upsilon_calibration(
             J1 = J1,
             J0 = J0,
             rho = rho,
-            q_bound = q_bound,
+            theta_bound = theta_bound,
             atol = atol,
             psi_margin = psi_margin,
             psi_floor = psi_floor,
             psi_derivative = psi_derivative,
             t1_reformulation = t1_reformulation,
             cache_digits = cache_digits,
+            counters = counters,
+
+            relax_knitro_outlev = relax_knitro_outlev,
+            relax_knitro_opttol = relax_knitro_opttol,
+            relax_knitro_feastol = relax_knitro_feastol,
 
             knitro_feastol = knitro_feastol,
             knitro_opttol = knitro_opttol,
@@ -974,8 +1250,20 @@ function solve_proximal_knitro_upsilon_calibration(
             abs(prox_obj - previous_prox_obj) :
             Inf
 
-        original_grad_norm = norm(current_val.g)
-        original_grad_norm_inf = norm(current_val.g, Inf)
+        current_g = _prox_get_subgradient!(
+            Csym,
+            current_val,
+            s,
+            t;
+            atol = atol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = psi_derivative,
+            counters = counters,
+        )
+
+        original_grad_norm = norm(current_g)
+        original_grad_norm_inf = norm(current_g, Inf)
 
         last_prox_obj = prox_obj
         last_prox_obj_change = prox_obj_change
@@ -1035,6 +1323,27 @@ function solve_proximal_knitro_upsilon_calibration(
                     subproblem_residual_norm = last_subproblem_residual_norm,
                     subproblem_residual_norm_inf = last_subproblem_residual_norm_inf,
                     cache_size = length(cache),
+                    num_objective_solves = counters.num_objective_solves,
+                    num_subgradient_evals = counters.num_subgradient_evals,
+                    num_objective_oracle_requests =
+                        counters.num_objective_oracle_requests,
+                    num_objective_cache_hits =
+                        counters.num_objective_cache_hits,
+                    objective_cache_hit_rate =
+                        counters.num_objective_oracle_requests == 0 ?
+                        0.0 :
+                        counters.num_objective_cache_hits /
+                        counters.num_objective_oracle_requests,
+
+                    num_subgradient_requests =
+                        counters.num_subgradient_requests,
+                    num_subgradient_cache_hits =
+                        counters.num_subgradient_cache_hits,
+                    subgradient_cache_hit_rate =
+                        counters.num_subgradient_requests == 0 ?
+                        0.0 :
+                        counters.num_subgradient_cache_hits /
+                        counters.num_subgradient_requests,
                 ),
             )
         end
@@ -1073,12 +1382,24 @@ function solve_proximal_knitro_upsilon_calibration(
     final_val = best_val
     final_theta = best_theta
 
-    final_original_grad_norm = norm(final_val.g)
-    final_original_grad_norm_inf = norm(final_val.g, Inf)
+    final_g = _prox_get_subgradient!(
+        Csym,
+        final_val,
+        s,
+        t;
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
+        counters = counters,
+    )
+
+    final_original_grad_norm = norm(final_g)
+    final_original_grad_norm_inf = norm(final_g, Inf)
 
     if verbose
         @printf(
-            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | psi = %.6e | ||grad V|| = %.3e | last_prox_obj = %.12e | last_Δprox_obj = %.3e | last_step = %.3e | gamma [%.4e, %.4e] | prox_iters = %d | stop = %s | cache = %d\n",
+            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | psi = %.6e | ||grad V|| = %.3e | last_prox_obj = %.12e | last_Δprox_obj = %.3e | last_step = %.3e | gamma [%.4e, %.4e] | prox_iters = %d | stop = %s | cache = %d | obj_solves = %d | grad_evals = %d\n",
             label,
             final_val.obj,
             unscaled_val.obj,
@@ -1093,6 +1414,8 @@ function solve_proximal_knitro_upsilon_calibration(
             prox_iter,
             stop_reason,
             length(cache),
+            counters.num_objective_solves,
+            counters.num_subgradient_evals,
         )
         flush(stdout)
     end
@@ -1100,7 +1423,6 @@ function solve_proximal_knitro_upsilon_calibration(
     return (
         gamma = final_val.gamma,
         theta = final_theta,
-        q = final_theta,
         psi = final_val.psi,
         lambda_min = final_val.lambda_min,
         x = final_val.x,
@@ -1109,7 +1431,6 @@ function solve_proximal_knitro_upsilon_calibration(
         obj = final_val.obj,
 
         best_ub = final_val.obj,
-        best_q = final_theta,
         best_gamma = final_val.gamma,
         best_psi = final_val.psi,
         best_lambda_min_S = final_val.lambda_min,
@@ -1117,7 +1438,6 @@ function solve_proximal_knitro_upsilon_calibration(
         best_max_gamma = maximum(final_val.gamma),
 
         best_eval = final_val,
-        final_q = theta,
         final_eval = current_val,
         history = hist,
         status_history = status_history,
@@ -1128,7 +1448,27 @@ function solve_proximal_knitro_upsilon_calibration(
         improved = final_val.obj < unscaled_val.obj,
 
         cache_size = length(cache),
-        num_evals = length(cache),
+        num_objective_solves = counters.num_objective_solves,
+        num_subgradient_evals = counters.num_subgradient_evals,
+        num_objective_oracle_requests =
+            counters.num_objective_oracle_requests,
+        num_objective_cache_hits =
+            counters.num_objective_cache_hits,
+        objective_cache_hit_rate =
+            counters.num_objective_oracle_requests == 0 ?
+            0.0 :
+            counters.num_objective_cache_hits /
+            counters.num_objective_oracle_requests,
+
+        num_subgradient_requests =
+            counters.num_subgradient_requests,
+        num_subgradient_cache_hits =
+            counters.num_subgradient_cache_hits,
+        subgradient_cache_hit_rate =
+            counters.num_subgradient_requests == 0 ?
+            0.0 :
+            counters.num_subgradient_cache_hits /
+            counters.num_subgradient_requests,
         prox_iters = prox_iter,
         rho = rho,
         prox_subproblem_solver = :knitro,

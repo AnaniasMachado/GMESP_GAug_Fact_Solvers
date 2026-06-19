@@ -5,19 +5,18 @@ using DataFrames
 using LinearAlgebra
 using JuMP
 using KNITRO
-using LBFGSB
 import MathOptInterface as MOI
 
-include("util.jl")
-include("heuristics.jl")
-include("solver_knitro.jl")
+include("./misc/util.jl")
+include("./misc/heuristics.jl")
+include("./solvers/solver_knitro.jl")
 
-include("gscaling_util.jl")
-include("gscaling_bfgs.jl")
-include("gscaling_lbfgsb.jl")
+include("./gscaling/gscaling_util.jl")
+include("./gscaling/gscaling_bfgs.jl")
 
-include("dual.jl")
-include("var_fixing.jl")
+include("./misc/dual.jl")
+include("./misc/var_fixing.jl")
+
 
 # -------------------------
 # Problem data

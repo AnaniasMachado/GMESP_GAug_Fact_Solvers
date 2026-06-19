@@ -242,6 +242,10 @@ function _calibrate_upsilon_bfgs_from_params(
         theta_perturbation = get(param_set, :theta_perturbation, 1e-4),
         use_steepest_descent_fallback =
             get(param_set, :use_steepest_descent_fallback, true),
+        # DDGFact+_Upsilon relaxation tolerances.
+        knitro_outlev = get(param_set, :knitro_outlev, nothing),
+        knitro_opttol = get(param_set, :knitro_opttol, nothing),
+        knitro_feastol = get(param_set, :knitro_feastol, nothing),
         verbose = get(param_set, :verbose, get(param_set, :verbose_bfgs, false)),
     )
 end
@@ -333,13 +337,14 @@ function _calibrate_upsilon_prox_step_from_params(
         J0 = Int[],
 
         theta0 = get(param_set, :theta0, nothing),
-        q0 = get(param_set, :q0, nothing),
 
         rho = get(param_set, :rho, 1e-3),
 
         theta_perturbation = get(param_set, :theta_perturbation, 1e-2),
         center_initial_theta = get(param_set, :center_initial_theta, false),
-        q_bound = get(param_set, :q_bound, 20.0),
+
+        # Prefer new name, but allow old q_bound dictionaries to keep working.
+        theta_bound = get(param_set, :theta_bound, get(param_set, :q_bound, 20.0)),
 
         psi_margin = get(param_set, :psi_margin, 1e-7),
         psi_floor = get(param_set, :psi_floor, 0.0),
@@ -348,6 +353,12 @@ function _calibrate_upsilon_prox_step_from_params(
 
         atol = atol,
 
+        # DDGFact+_Upsilon relaxation tolerances.
+        relax_knitro_outlev = get(param_set, :relax_knitro_outlev, nothing),
+        relax_knitro_opttol = get(param_set, :relax_knitro_opttol, nothing),
+        relax_knitro_feastol = get(param_set, :relax_knitro_feastol, nothing),
+
+        # Proximal subproblem tolerances.
         knitro_feastol = get(param_set, :knitro_feastol, 1e-6),
         knitro_opttol = get(param_set, :knitro_opttol, 1e-2),
         knitro_xtol = get(param_set, :knitro_xtol, 1e-4),

@@ -1,5 +1,3 @@
-# make_bnb_main_results_table.jl
-
 using CSV
 using DataFrames
 using Printf
@@ -22,9 +20,14 @@ function infer_n_from_filename(path::AbstractString)
     return m === nothing ? nothing : parse(Int, m.captures[1])
 end
 
-function infer_kappa_from_filename(path::AbstractString)
-    m = match(r"kappa([^_./\\]+)", basename(path))
-    return m === nothing ? nothing : m.captures[1]
+function infer_s_from_filename(path::AbstractString)
+    m = match(r"s(\d+)", basename(path))
+    return m === nothing ? nothing : parse(Int, m.captures[1])
+end
+
+function infer_t_from_filename(path::AbstractString)
+    m = match(r"t(\d+)", basename(path))
+    return m === nothing ? nothing : parse(Int, m.captures[1])
 end
 
 function fmt_float(x; digits::Int = 4)
@@ -71,6 +74,20 @@ function method_name(row)
     end
 end
 
+function method_order(method::AbstractString)
+    if method == raw"DDGFact"
+        return 1
+    elseif method == raw"DDGFact$^+$"
+        return 2
+    elseif method == raw"BFGS"
+        return 3
+    elseif method == raw"Prox Knitro"
+        return 4
+    else
+        return 100
+    end
+end
+
 function load_bnb_table(path::AbstractString)
     df = DataFrame(
         CSV.File(
@@ -107,10 +124,6 @@ end
 
 function build_main_results_table(df::DataFrame)
     rows = DataFrame(
-        data_n = Int[],
-        n = Int[],
-        s = Int[],
-        t = Int[],
         Method = String[],
         RootGap = Float64[],
         Runtime = Float64[],
@@ -119,17 +132,16 @@ function build_main_results_table(df::DataFrame)
         FixedVars = Int[],
         MaxIntGap = Float64[],
         AvgIntGap = Float64[],
+        _order = Int[],
     )
 
     for row in eachrow(df)
+        method = method_name(row)
+
         push!(
             rows,
             (
-                data_n = Int(row.data_n),
-                n = Int(row.n),
-                s = Int(row.s),
-                t = Int(row.t),
-                Method = method_name(row),
+                Method = method,
                 RootGap = Float64(row.bnb_root_gap),
                 Runtime = Float64(row.bnb_runtime),
                 KnitroTime = Float64(row.bnb_knitro_time),
@@ -137,11 +149,13 @@ function build_main_results_table(df::DataFrame)
                 FixedVars = Int(row.n_fixed_total_bnb),
                 MaxIntGap = Float64(row.bnb_int_gap_max),
                 AvgIntGap = Float64(row.bnb_int_gap_avg),
+                _order = method_order(method),
             ),
         )
     end
 
-    sort!(rows, [:data_n, :n, :s, :t, :Method])
+    sort!(rows, :_order)
+    select!(rows, Not(:_order))
 
     return rows
 end
@@ -149,28 +163,34 @@ end
 function write_latex_main_results_table(
     tab::DataFrame;
     filename::AbstractString,
-    caption::AbstractString,
-    label::AbstractString,
+    n_value::Int,
+    s_value::Int,
+    t_value::Int,
 )
     open(filename, "w") do io
         println(io, raw"\begin{table}[!ht]")
-        println(io, raw"\centering")
-        println(io, raw"\footnotesize")
-        println(io, "\\caption{$caption}")
-        println(io, "\\label{$label}")
-        println(io, raw"\begin{tabular}{rrrrlrrrrrrr}")
-        println(io, raw"\hline")
-        println(io, raw"\textbf{data\_n} & \textbf{$n$} & \textbf{$s$} & \textbf{$t$} & \textbf{Method} & \textbf{Root gap} & \textbf{Runtime} & \textbf{Knitro time} & \textbf{Nodes} & \textbf{Fixed vars.} & \textbf{Max int. gap} & \textbf{Avg int. gap} \\")
-        println(io, raw"\hline")
+        println(io, raw"    \centering")
+        println(io, raw"    \scriptsize")
+        println(io, raw"    \setlength{\tabcolsep}{3pt}")
+        println(io, raw"    \renewcommand{\arraystretch}{0.95}")
+        println(io, "    \\caption{Main branch-and-bound results for \$n = $(n_value)\$, \$s = $(s_value)\$ and \$t = $(t_value)\$.}")
+        println(io, "    \\label{tab:bnb_main_results_n$(n_value)_s$(s_value)_t$(t_value)}")
+        println(io, raw"    \begin{tabular}{l|rrr|rr|rr}")
+        println(io, raw"    \hline")
+        println(io, raw"    \textbf{Method}")
+        println(io, raw"    & \textbf{Root gap}")
+        println(io, raw"    & \textbf{Runtime}")
+        println(io, raw"    & \textbf{Knitro time}")
+        println(io, raw"    & \textbf{Nodes}")
+        println(io, raw"    & \textbf{Fixed vars.}")
+        println(io, raw"    & \textbf{Max int. gap}")
+        println(io, raw"    & \textbf{Avg int. gap} \\")
+        println(io, raw"    \hline")
 
         for row in eachrow(tab)
             println(
                 io,
-                "$(row.data_n) & " *
-                "$(row.n) & " *
-                "$(row.s) & " *
-                "$(row.t) & " *
-                "$(row.Method) & " *
+                "    $(row.Method) & " *
                 "$(fmt_float(row.RootGap; digits = 6)) & " *
                 "$(fmt_float(row.Runtime; digits = 3)) & " *
                 "$(fmt_float(row.KnitroTime; digits = 3)) & " *
@@ -181,8 +201,8 @@ function write_latex_main_results_table(
             )
         end
 
-        println(io, raw"\hline")
-        println(io, raw"\end{tabular}")
+        println(io, raw"    \hline")
+        println(io, raw"    \end{tabular}")
         println(io, raw"\end{table}")
     end
 
@@ -199,22 +219,30 @@ df = load_bnb_table(bnb_file)
 tab = build_main_results_table(df)
 
 n_from_file = infer_n_from_filename(bnb_file)
-kappa_from_file = infer_kappa_from_filename(bnb_file)
+s_from_file = infer_s_from_filename(bnb_file)
+t_from_file = infer_t_from_filename(bnb_file)
 
-n_label =
-    n_from_file === nothing ? string(first(unique(df.n))) : string(n_from_file)
+n_value =
+    n_from_file === nothing ? Int(first(unique(df.n))) : n_from_file
 
-kappa_label =
-    kappa_from_file === nothing ? "unknown" : kappa_from_file
+s_value =
+    s_from_file === nothing ? Int(first(unique(df.s))) : s_from_file
+
+t_value =
+    t_from_file === nothing ? Int(first(unique(df.t))) : t_from_file
 
 out_file =
-    joinpath(tables_dir, "bnb_main_results_n$(n_label)_kappa$(kappa_label).txt")
+    joinpath(
+        tables_dir,
+        "bnb_main_results_n$(n_value)_s$(s_value)_t$(t_value).txt",
+    )
 
 write_latex_main_results_table(
     tab;
     filename = out_file,
-    caption = "Main branch-and-bound results for \$n = $(n_label)\$ and \$\\kappa = $(kappa_label)\$.",
-    label = "tab:bnb_main_results_n$(n_label)_kappa$(kappa_label)",
+    n_value = n_value,
+    s_value = s_value,
+    t_value = t_value,
 )
 
 println()

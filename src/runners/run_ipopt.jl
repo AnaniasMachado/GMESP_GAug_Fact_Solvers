@@ -8,9 +8,10 @@ using Ipopt
 using KNITRO
 import MathOptInterface as MOI
 
-include("util.jl")
-include("heuristics.jl")
-include("solver_ipopt.jl")
+include("./misc/util.jl")
+include("./misc/heuristics.jl")
+include("./solvers/solver_ipopt.jl")
+
 
 # -------------------------
 # Problem data

@@ -1,5 +1,3 @@
-# plot_upsilon.jl
-
 using CSV
 using DataFrames
 using Statistics

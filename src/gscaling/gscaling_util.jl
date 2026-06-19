@@ -473,7 +473,7 @@ end
 
 
 # ------------------------------------------------------------
-# Objective and gradient evaluation for BFGS
+# Objective and subgradient evaluation for calibration
 # ------------------------------------------------------------
 function eval_ddfactplus_upsilon_calibration(
     C::Symmetric{<:Real,<:AbstractMatrix},
@@ -487,6 +487,13 @@ function eval_ddfactplus_upsilon_calibration(
     psi_floor::Float64 = 0.0,
     psi_derivative::Bool = true,
     t1_reformulation::Bool = true,
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+
+    # Optional Knitro solver tolerances/options.
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
 )
     n = size(C, 1)
 
@@ -510,16 +517,6 @@ function eval_ddfactplus_upsilon_calibration(
 
     if (t == 1) && t1_reformulation
         # Reformulation for t = 1
-        # result_t1_reform =
-        #     ddfact_upsilon_t1_ipopt(
-        #         C,
-        #         gamma,
-        #         s,
-        #         psi;
-        #         J1 = J1,
-        #         atol = atol,
-        #     )
-
         result_t1_reform =
             ddfact_upsilon_t1_knitro(
                 C,
@@ -548,6 +545,11 @@ function eval_ddfactplus_upsilon_calibration(
             psi;
             J1 = J1,
             atol = atol,
+            x0 = x0,
+            y0 = y0,
+            knitro_outlev = knitro_outlev,
+            knitro_opttol = knitro_opttol,
+            knitro_feastol = knitro_feastol,
         )
     end
 
@@ -585,4 +587,134 @@ function eval_ddfactplus_upsilon_calibration(
     end
 
     return obj, g, gamma, psi, λmin, x, y
+end
+
+
+# ------------------------------------------------------------
+# Objective evaluation for calibration
+# ------------------------------------------------------------
+function eval_ddfactplus_upsilon_calibration_objective(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    theta::Vector{Float64},
+    s::Int,
+    t::Int;
+    J1::AbstractVector{<:Integer} = Int[],
+    J0::AbstractVector{<:Integer} = Int[],
+    atol::Float64 = 1e-10,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    t1_reformulation::Bool = true,
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
+)
+    n = size(C, 1)
+
+    J1 = sort(unique(collect(J1)))
+    J0 = sort(unique(collect(J0)))
+
+    @assert all(i -> 1 <= i <= n, J1)
+    @assert all(i -> 1 <= i <= n, J0)
+    @assert isempty(intersect(J1, J0))
+    @assert length(J1) <= s
+    @assert s <= n - length(J0)
+
+    gamma = exp.(theta)
+
+    psi, λmin = max_feasible_psi(
+        C,
+        gamma;
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+    )
+
+    if (t == 1) && t1_reformulation
+        result_t1_reform =
+            ddfact_upsilon_t1_knitro(
+                C,
+                gamma,
+                s,
+                psi;
+                J1 = J1,
+                atol = atol,
+            )
+
+        x = result_t1_reform.x
+        y = result_t1_reform.y
+        obj = result_t1_reform.primal_obj
+
+        reform_gap = abs(result_t1_reform.obj_val - result_t1_reform.primal_obj)
+
+        if reform_gap > 1e-6
+            @warn "t=1 reformulation objective and recovered primal objective differ" reform_gap
+        end
+    else
+        x, y, obj = aug_ddfact_upsilon_gmesp(
+            C,
+            gamma,
+            s,
+            t,
+            psi;
+            J1 = J1,
+            atol = atol,
+            x0 = x0,
+            y0 = y0,
+            knitro_outlev = knitro_outlev,
+            knitro_opttol = knitro_opttol,
+            knitro_feastol = knitro_feastol,
+        )
+    end
+
+    return (
+        obj = Float64(obj),
+        gamma = Vector{Float64}(gamma),
+        psi = Float64(psi),
+        λmin = Float64(λmin),
+        x = Vector{Float64}(x),
+        y = Vector{Float64}(y),
+        theta = copy(theta),
+    )
+end
+
+
+# ------------------------------------------------------------
+# Subradient evaluation for calibration
+# ------------------------------------------------------------
+function eval_ddfactplus_upsilon_calibration_subgradient(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    val,
+    s::Int,
+    t::Int;
+    atol::Float64 = 1e-10,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    psi_derivative::Bool = true,
+)
+    if psi_derivative
+        return theta_calibration_subgradient_with_psi_chain(
+            C,
+            val.gamma,
+            val.x,
+            val.y,
+            val.psi,
+            s,
+            t;
+            atol = atol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+        )
+    else
+        return theta_calibration_subgradient(
+            C,
+            val.gamma,
+            val.x,
+            val.y,
+            val.psi,
+            s,
+            t;
+            atol = atol,
+        )
+    end
 end

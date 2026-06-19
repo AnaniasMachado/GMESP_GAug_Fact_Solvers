@@ -3,22 +3,25 @@ using Printf
 
 
 # ------------------------------------------------------------
-# DDGFact+_Upsilon oracle:
-# psi = highest feasible psi(gamma)
+# BFGS objective
 # ------------------------------------------------------------
-function eval_ddfactplus_upsilon_calibration_oracle(
+function _bfgs_eval_upsilon_objective(
     C::Symmetric{<:Real,<:AbstractMatrix},
     theta::Vector{Float64},
     s::Int,
     t::Int;
     J1::AbstractVector{<:Integer} = Int[],
     atol::Float64 = 1e-10,
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
     psi_margin::Float64 = 1e-8,
     psi_floor::Float64 = 0.0,
-    psi_derivative::Bool = true,
     use_t1_oracle::Bool = true,
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
 )
-    return eval_ddfactplus_upsilon_calibration(
+    return eval_ddfactplus_upsilon_calibration_objective(
         C,
         theta,
         s,
@@ -28,85 +31,39 @@ function eval_ddfactplus_upsilon_calibration_oracle(
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = use_t1_oracle,
+        x0 = x0,
+        y0 = y0,
+        knitro_outlev = knitro_outlev,
+        knitro_opttol = knitro_opttol,
+        knitro_feastol = knitro_feastol,
     )
 end
 
 
 # ------------------------------------------------------------
-# DDGFact_Upsilon oracle:
-# fixed psi = 0
-#
-# This uses the fixed-psi theta subgradient.
-# Therefore there is no psi-derivative chain term.
+# BFGS subgradient
 # ------------------------------------------------------------
-function eval_ddfact_upsilon_calibration_oracle(
+function _bfgs_eval_upsilon_subgradient(
     C::Symmetric{<:Real,<:AbstractMatrix},
-    theta::Vector{Float64},
+    val,
     s::Int,
     t::Int;
-    J1::AbstractVector{<:Integer} = Int[],
     atol::Float64 = 1e-10,
-    use_t1_oracle::Bool = true,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    psi_derivative::Bool = true,
 )
-    n = size(C, 1)
-
-    J1 = sort(unique(collect(J1)))
-
-    @assert all(i -> 1 <= i <= n, J1)
-    @assert length(J1) <= s
-    @assert s <= n
-
-    gamma = exp.(theta)
-    psi = 0.0
-
-    Cgamma = scaled_matrix(C, gamma)
-    λmin = eigmin(Cgamma)
-
-    if (t == 1) && use_t1_oracle
-        result_t1_reform = ddfact_upsilon_t1_knitro(
-            C,
-            gamma,
-            s,
-            psi;
-            J1 = J1,
-            atol = atol,
-        )
-
-        x = result_t1_reform.x
-        y = result_t1_reform.y
-        obj = result_t1_reform.primal_obj
-
-        reform_gap = abs(result_t1_reform.obj_val - result_t1_reform.primal_obj)
-
-        if reform_gap > 1e-6
-            @warn "t=1 reformulation objective and recovered primal objective differ" reform_gap
-        end
-    else
-        x, y, obj = aug_ddfact_upsilon_gmesp(
-            C,
-            gamma,
-            s,
-            t,
-            psi;
-            J1 = J1,
-            atol = atol,
-        )
-    end
-
-    g = theta_calibration_subgradient(
+    return eval_ddfactplus_upsilon_calibration_subgradient(
         C,
-        gamma,
-        x,
-        y,
-        psi,
+        val,
         s,
         t;
         atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
     )
-
-    return obj, g, gamma, psi, λmin, x, y
 end
 
 
@@ -114,7 +71,6 @@ end
 # Armijo line search along a supplied direction p
 # ------------------------------------------------------------
 function _bfgs_armijo_line_search(
-    oracle::Function,
     C::Symmetric{<:Real,<:AbstractMatrix},
     theta::Vector{Float64},
     obj::Float64,
@@ -124,6 +80,11 @@ function _bfgs_armijo_line_search(
     t::Int;
     J1::AbstractVector{<:Integer} = Int[],
     atol::Float64 = 1e-10,
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    psi_derivative::Bool = true,
     alpha0::Float64 = 1.0,
     alpha_min::Float64 = 1e-8,
     alpha_decay::Float64 = 0.5,
@@ -131,6 +92,9 @@ function _bfgs_armijo_line_search(
     max_backtracks::Int = 20,
     max_theta_norm::Float64 = 50.0,
     use_t1_oracle::Bool = true,
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
     verbose::Bool = false,
 )
     descent_pred = dot(g, p)
@@ -141,38 +105,51 @@ function _bfgs_armijo_line_search(
 
         if norm(theta_candidate, Inf) > max_theta_norm
             alpha *= alpha_decay
-
-            if alpha < alpha_min
-                break
-            end
-
+            alpha < alpha_min && break
             continue
         end
 
         try
-            obj_cand, g_cand, gamma_cand, psi_cand, λmin_cand, x_cand, y_cand =
-                oracle(
+            val_cand = _bfgs_eval_upsilon_objective(
+                C,
+                theta_candidate,
+                s,
+                t;
+                J1 = J1,
+                atol = atol,
+                x0 = x0,
+                y0 = y0,
+                psi_margin = psi_margin,
+                psi_floor = psi_floor,
+                use_t1_oracle = use_t1_oracle,
+                knitro_outlev = knitro_outlev,
+                knitro_opttol = knitro_opttol,
+                knitro_feastol = knitro_feastol,
+            )
+
+            if val_cand.obj <= obj + armijo_c1 * alpha * descent_pred
+                g_cand = _bfgs_eval_upsilon_subgradient(
                     C,
-                    theta_candidate,
+                    val_cand,
                     s,
                     t;
-                    J1 = J1,
                     atol = atol,
-                    use_t1_oracle = use_t1_oracle,
+                    psi_margin = psi_margin,
+                    psi_floor = psi_floor,
+                    psi_derivative = psi_derivative,
                 )
 
-            if obj_cand <= obj + armijo_c1 * alpha * descent_pred
                 return (
                     accepted = true,
                     alpha = alpha,
                     theta = theta_candidate,
-                    obj = obj_cand,
+                    obj = val_cand.obj,
                     g = g_cand,
-                    gamma = gamma_cand,
-                    psi = psi_cand,
-                    λmin = λmin_cand,
-                    x = x_cand,
-                    y = y_cand,
+                    gamma = val_cand.gamma,
+                    psi = val_cand.psi,
+                    λmin = val_cand.λmin,
+                    x = val_cand.x,
+                    y = val_cand.y,
                 )
             end
         catch err
@@ -180,10 +157,7 @@ function _bfgs_armijo_line_search(
         end
 
         alpha *= alpha_decay
-
-        if alpha < alpha_min
-            break
-        end
+        alpha < alpha_min && break
     end
 
     return (
@@ -207,7 +181,6 @@ end
 # Accepts any strict improvement.
 # ------------------------------------------------------------
 function _bfgs_steepest_descent_line_search(
-    oracle::Function,
     C::Symmetric{<:Real,<:AbstractMatrix},
     theta::Vector{Float64},
     obj::Float64,
@@ -216,12 +189,20 @@ function _bfgs_steepest_descent_line_search(
     t::Int;
     J1::AbstractVector{<:Integer} = Int[],
     atol::Float64 = 1e-10,
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    psi_derivative::Bool = true,
     alpha0::Float64 = 1.0,
     alpha_min::Float64 = 1e-8,
     alpha_decay::Float64 = 0.5,
     max_backtracks::Int = 20,
     max_theta_norm::Float64 = 50.0,
     use_t1_oracle::Bool = true,
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
     verbose::Bool = false,
 )
     p_sd = -copy(g)
@@ -251,38 +232,51 @@ function _bfgs_steepest_descent_line_search(
 
         if norm(theta_candidate, Inf) > max_theta_norm
             alpha *= alpha_decay
-
-            if alpha < alpha_min
-                break
-            end
-
+            alpha < alpha_min && break
             continue
         end
 
         try
-            obj_cand, g_cand, gamma_cand, psi_cand, λmin_cand, x_cand, y_cand =
-                oracle(
+            val_cand = _bfgs_eval_upsilon_objective(
+                C,
+                theta_candidate,
+                s,
+                t;
+                J1 = J1,
+                atol = atol,
+                x0 = x0,
+                y0 = y0,
+                psi_margin = psi_margin,
+                psi_floor = psi_floor,
+                use_t1_oracle = use_t1_oracle,
+                knitro_outlev = knitro_outlev,
+                knitro_opttol = knitro_opttol,
+                knitro_feastol = knitro_feastol,
+            )
+
+            if val_cand.obj < obj
+                g_cand = _bfgs_eval_upsilon_subgradient(
                     C,
-                    theta_candidate,
+                    val_cand,
                     s,
                     t;
-                    J1 = J1,
                     atol = atol,
-                    use_t1_oracle = use_t1_oracle,
+                    psi_margin = psi_margin,
+                    psi_floor = psi_floor,
+                    psi_derivative = psi_derivative,
                 )
 
-            if obj_cand < obj
                 return (
                     accepted = true,
                     alpha = alpha,
                     theta = theta_candidate,
-                    obj = obj_cand,
+                    obj = val_cand.obj,
                     g = g_cand,
-                    gamma = gamma_cand,
-                    psi = psi_cand,
-                    λmin = λmin_cand,
-                    x = x_cand,
-                    y = y_cand,
+                    gamma = val_cand.gamma,
+                    psi = val_cand.psi,
+                    λmin = val_cand.λmin,
+                    x = val_cand.x,
+                    y = val_cand.y,
                 )
             end
         catch err
@@ -290,10 +284,7 @@ function _bfgs_steepest_descent_line_search(
         end
 
         alpha *= alpha_decay
-
-        if alpha < alpha_min
-            break
-        end
+        alpha < alpha_min && break
     end
 
     return (
@@ -318,7 +309,6 @@ function _calibrate_upsilon_bfgs_core(
     C::Symmetric{<:Real,<:AbstractMatrix},
     s::Int,
     t::Int;
-    oracle::Function,
     method_name::String,
     J1::AbstractVector{<:Integer} = Int[],
     theta0::Union{Nothing,Vector{Float64}} = nothing,
@@ -326,6 +316,9 @@ function _calibrate_upsilon_bfgs_core(
     max_iter::Int = 20,
     grad_tol::Float64 = 1e-6,
     step_tol::Float64 = 1e-10,
+    psi_margin::Float64 = 1e-8,
+    psi_floor::Float64 = 0.0,
+    psi_derivative::Bool = true,
     alpha0::Float64 = 1.0,
     alpha_min::Float64 = 1e-8,
     alpha_decay::Float64 = 0.5,
@@ -338,6 +331,9 @@ function _calibrate_upsilon_bfgs_core(
     t1_fallback_limit::Int = 1,
     theta_perturbation::Float64 = 1e-4,
     use_steepest_descent_fallback::Bool = true,
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
     verbose::Bool = true,
 )
     n = size(C, 1)
@@ -360,6 +356,9 @@ function _calibrate_upsilon_bfgs_core(
         theta = copy(theta0)
     end
 
+    x_start::Union{Nothing,Vector{Float64}} = nothing
+    y_start::Union{Nothing,Vector{Float64}} = nothing
+
     current_use_t1_oracle = (t == 1) && t1_reformulation
 
     fallback_used = false
@@ -373,16 +372,43 @@ function _calibrate_upsilon_bfgs_core(
         current_use_t1_oracle &&
         fallback_count < t1_fallback_limit
 
-    obj, g, gamma, psi, λmin, x, y =
-        oracle(
-            C,
-            theta,
-            s,
-            t;
-            J1 = J1,
-            atol = atol,
-            use_t1_oracle = current_use_t1_oracle,
-        )
+    val = _bfgs_eval_upsilon_objective(
+        C,
+        theta,
+        s,
+        t;
+        J1 = J1,
+        atol = atol,
+        x0 = x_start,
+        y0 = y_start,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        use_t1_oracle = current_use_t1_oracle,
+        knitro_outlev = knitro_outlev,
+        knitro_opttol = knitro_opttol,
+        knitro_feastol = knitro_feastol,
+    )
+
+    g = _bfgs_eval_upsilon_subgradient(
+        C,
+        val,
+        s,
+        t;
+        atol = atol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
+    )
+
+    obj = val.obj
+    gamma = copy(val.gamma)
+    psi = val.psi
+    λmin = val.λmin
+    x = copy(val.x)
+    y = copy(val.y)
+
+    x_start = copy(x)
+    y_start = copy(y)  
 
     unscaled_obj = obj
     unscaled_gamma = copy(gamma)
@@ -428,7 +454,6 @@ function _calibrate_upsilon_bfgs_core(
         end
 
         trial = _bfgs_armijo_line_search(
-            oracle,
             C,
             theta,
             obj,
@@ -438,6 +463,11 @@ function _calibrate_upsilon_bfgs_core(
             t;
             J1 = J1,
             atol = atol,
+            x0 = x_start,
+            y0 = y_start,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = psi_derivative,
             alpha0 = alpha0,
             alpha_min = alpha_min,
             alpha_decay = alpha_decay,
@@ -445,6 +475,9 @@ function _calibrate_upsilon_bfgs_core(
             max_backtracks = max_backtracks,
             max_theta_norm = max_theta_norm,
             use_t1_oracle = use_t1_oracle,
+            knitro_outlev = knitro_outlev,
+            knitro_opttol = knitro_opttol,
+            knitro_feastol = knitro_feastol,
             verbose = verbose,
         )
 
@@ -454,7 +487,6 @@ function _calibrate_upsilon_bfgs_core(
             verbose && println("  BFGS line search failed. Trying steepest-descent fallback.")
 
             trial = _bfgs_steepest_descent_line_search(
-                oracle,
                 C,
                 theta,
                 obj,
@@ -463,12 +495,20 @@ function _calibrate_upsilon_bfgs_core(
                 t;
                 J1 = J1,
                 atol = atol,
+                x0 = x_start,
+                y0 = y_start,
+                psi_margin = psi_margin,
+                psi_floor = psi_floor,
+                psi_derivative = psi_derivative,
                 alpha0 = alpha0,
                 alpha_min = alpha_min,
                 alpha_decay = alpha_decay,
                 max_backtracks = max_backtracks,
                 max_theta_norm = max_theta_norm,
                 use_t1_oracle = use_t1_oracle,
+                knitro_outlev = knitro_outlev,
+                knitro_opttol = knitro_opttol,
+                knitro_feastol = knitro_feastol,
                 verbose = verbose,
             )
 
@@ -522,6 +562,9 @@ function _calibrate_upsilon_bfgs_core(
         obj = obj_trial
         g .= g_trial
 
+        x_start = copy(x_trial)
+        y_start = copy(y_trial)
+
         update_best!()
 
         return (
@@ -546,16 +589,43 @@ function _calibrate_upsilon_bfgs_core(
 
         H .= Matrix{Float64}(I, n, n)
 
-        obj, g, gamma, psi, λmin, x, y =
-            oracle(
-                C,
-                theta,
-                s,
-                t;
-                J1 = J1,
-                atol = atol,
-                use_t1_oracle = false,
-            )
+        val = _bfgs_eval_upsilon_objective(
+            C,
+            theta,
+            s,
+            t;
+            J1 = J1,
+            atol = atol,
+            x0 = x_start,
+            y0 = y_start,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            use_t1_oracle = false,
+            knitro_outlev = knitro_outlev,
+            knitro_opttol = knitro_opttol,
+            knitro_feastol = knitro_feastol,
+        )
+
+        g = _bfgs_eval_upsilon_subgradient(
+            C,
+            val,
+            s,
+            t;
+            atol = atol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = psi_derivative,
+        )
+
+        obj = val.obj
+        gamma = copy(val.gamma)
+        psi = val.psi
+        λmin = val.λmin
+        x = copy(val.x)
+        y = copy(val.y)
+
+        x_start = copy(x)
+        y_start = copy(y)
 
         update_best!()
 
@@ -668,69 +738,7 @@ end
 
 
 # ------------------------------------------------------------
-# Public method 1:
-# DDGFact_Upsilon BFGS calibration with fixed psi = 0
-#
-# No psi derivative term is used.
-# ------------------------------------------------------------
-function calibrate_upsilon_bfgs_ddfact(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    s::Int,
-    t::Int;
-    J1::AbstractVector{<:Integer} = Int[],
-    theta0::Union{Nothing,Vector{Float64}} = nothing,
-    atol::Float64 = 1e-10,
-    max_iter::Int = 20,
-    grad_tol::Float64 = 1e-6,
-    step_tol::Float64 = 1e-10,
-    alpha0::Float64 = 1.0,
-    alpha_min::Float64 = 1e-8,
-    alpha_decay::Float64 = 0.5,
-    armijo_c1::Float64 = 1e-4,
-    curvature_tol::Float64 = 1e-10,
-    max_backtracks::Int = 20,
-    max_theta_norm::Float64 = 50.0,
-    t1_reformulation::Bool = true,
-    t1_fallback::Bool = true,
-    t1_fallback_limit::Int = 1,
-    theta_perturbation::Float64 = 1e-4,
-    use_steepest_descent_fallback::Bool = true,
-    verbose::Bool = true,
-)
-    return _calibrate_upsilon_bfgs_core(
-        C,
-        s,
-        t;
-        oracle = eval_ddfact_upsilon_calibration_oracle,
-        method_name = "BFGS-DDGFact-Upsilon",
-        J1 = J1,
-        theta0 = theta0,
-        atol = atol,
-        max_iter = max_iter,
-        grad_tol = grad_tol,
-        step_tol = step_tol,
-        alpha0 = alpha0,
-        alpha_min = alpha_min,
-        alpha_decay = alpha_decay,
-        armijo_c1 = armijo_c1,
-        curvature_tol = curvature_tol,
-        max_backtracks = max_backtracks,
-        max_theta_norm = max_theta_norm,
-        t1_reformulation = t1_reformulation,
-        t1_fallback = t1_fallback,
-        t1_fallback_limit = t1_fallback_limit,
-        theta_perturbation = theta_perturbation,
-        use_steepest_descent_fallback = use_steepest_descent_fallback,
-        verbose = verbose,
-    )
-end
-
-
-# ------------------------------------------------------------
-# Public method 2:
 # DDGFactplus_Upsilon BFGS calibration with psi = psi(gamma)
-#
-# We use a psi derivative term.
 # ------------------------------------------------------------
 function calibrate_upsilon_bfgs_ddfactplus(
     C::Symmetric{<:Real,<:AbstractMatrix},
@@ -757,36 +765,15 @@ function calibrate_upsilon_bfgs_ddfactplus(
     t1_fallback_limit::Int = 1,
     theta_perturbation::Float64 = 1e-4,
     use_steepest_descent_fallback::Bool = true,
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
     verbose::Bool = true,
 )
-    function plus_oracle(
-        C_oracle::Symmetric{<:Real,<:AbstractMatrix},
-        theta_oracle::Vector{Float64},
-        s_oracle::Int,
-        t_oracle::Int;
-        J1::AbstractVector{<:Integer} = Int[],
-        atol::Float64 = 1e-10,
-        use_t1_oracle::Bool = true,
-    )
-        return eval_ddfactplus_upsilon_calibration_oracle(
-            C_oracle,
-            theta_oracle,
-            s_oracle,
-            t_oracle;
-            J1 = J1,
-            atol = atol,
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-            psi_derivative = psi_derivative,
-            use_t1_oracle = use_t1_oracle,
-        )
-    end
-
     return _calibrate_upsilon_bfgs_core(
         C,
         s,
         t;
-        oracle = plus_oracle,
         method_name = "BFGS-DDGFactplus-Upsilon",
         J1 = J1,
         theta0 = theta0,
@@ -794,6 +781,9 @@ function calibrate_upsilon_bfgs_ddfactplus(
         max_iter = max_iter,
         grad_tol = grad_tol,
         step_tol = step_tol,
+        psi_margin = psi_margin,
+        psi_floor = psi_floor,
+        psi_derivative = psi_derivative,
         alpha0 = alpha0,
         alpha_min = alpha_min,
         alpha_decay = alpha_decay,
@@ -806,6 +796,9 @@ function calibrate_upsilon_bfgs_ddfactplus(
         t1_fallback_limit = t1_fallback_limit,
         theta_perturbation = theta_perturbation,
         use_steepest_descent_fallback = use_steepest_descent_fallback,
+        knitro_outlev = knitro_outlev,
+        knitro_opttol = knitro_opttol,
+        knitro_feastol = knitro_feastol,
         verbose = verbose,
     )
 end

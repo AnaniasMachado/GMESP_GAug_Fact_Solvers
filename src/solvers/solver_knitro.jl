@@ -3,15 +3,22 @@ using JuMP
 using KNITRO
 
 
-function add_knitro_options!(model)
+function add_knitro_options!(
+    model;
+    outlev::Union{Nothing,Int} = nothing,
+    opttol::Union{Nothing,Float64} = nothing,
+    feastol::Union{Nothing,Float64} = nothing,
+)
     # Suppress Knitro output.
-    set_optimizer_attribute(model, "outlev", 0)
+    set_optimizer_attribute(model, "outlev", outlev === nothing ? 0 : outlev)
 
     # Optimality tolerances, analogous to Ipopt's tol/dual_inf_tol.
-    set_optimizer_attribute(model, "opttol", 1e-8)
+    set_optimizer_attribute(model, "opttol", opttol === nothing ? 1e-8 : opttol)
 
     # Feasibility tolerances, analogous to Ipopt's constr_viol_tol.
-    set_optimizer_attribute(model, "feastol", 1e-8)
+    set_optimizer_attribute(model, "feastol", feastol === nothing ? 1e-8 : feastol)
+
+    return nothing
 end
 
 
@@ -412,7 +419,14 @@ function aug_ddfact_upsilon_gmesp(
     t::Integer,
     psi::Float64;
     J1::AbstractVector{<:Integer} = Int[],
+    x0::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    y0::Union{Nothing,AbstractVector{<:Real}} = nothing,
     atol = 1e-10,
+
+    # Optional Knitro options.
+    knitro_outlev::Union{Nothing,Int} = nothing,
+    knitro_opttol::Union{Nothing,Float64} = nothing,
+    knitro_feastol::Union{Nothing,Float64} = nothing,
 )
     n = size(C, 1)
 
@@ -445,8 +459,17 @@ function aug_ddfact_upsilon_gmesp(
     end
 
     model = Model(KNITRO.Optimizer)
-    add_knitro_options!(model)
-    set_silent(model)
+
+    add_knitro_options!(
+        model;
+        outlev = knitro_outlev,
+        opttol = knitro_opttol,
+        feastol = knitro_feastol,
+    )
+
+    if knitro_outlev === nothing || knitro_outlev <= 0
+        set_silent(model)
+    end
 
     @variable(model, atol <= x[i = 1:n] <= 1 - atol)
     @variable(model, atol <= y[i = 1:n] <= 1 - atol)
@@ -454,6 +477,26 @@ function aug_ddfact_upsilon_gmesp(
     for i in J1
         set_upper_bound(x[i], 1.0)
         fix(x[i], 1.0; force = true)
+    end
+
+    J1_set = Set(J1)
+
+    if x0 !== nothing
+        @assert length(x0) == n
+
+        for i in 1:n
+            xi = i in J1_set ? 1.0 : clamp(Float64(x0[i]), atol, 1.0 - atol)
+            set_start_value(x[i], xi)
+        end
+    end
+
+    if y0 !== nothing
+        @assert length(y0) == n
+
+        for i in 1:n
+            yi = clamp(Float64(y0[i]), atol, 1.0 - atol)
+            set_start_value(y[i], yi)
+        end
     end
 
     @constraint(model, sum(x[i] for i in Jfree) == s - length(J1))

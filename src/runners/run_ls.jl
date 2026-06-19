@@ -4,8 +4,9 @@ using CSV
 using DataFrames
 using LinearAlgebra
 
-include("util.jl")
-include("heuristics.jl")
+include("./misc/util.jl")
+include("./misc/heuristics.jl")
+
 
 # -------------------------
 # Problem data

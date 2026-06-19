@@ -74,6 +74,10 @@ bfgs_param_sets = Dict(
 
         :use_steepest_descent_fallback => true,
 
+        :knitro_outlev => nothing,
+        :knitro_opttol => 1e-8,
+        :knitro_feastol => 1e-8,
+
         :verbose_bfgs => false,
     ),
 
@@ -99,115 +103,11 @@ bfgs_param_sets = Dict(
 
         :use_steepest_descent_fallback => true,
 
+        :knitro_outlev => nothing,
+        :knitro_opttol => 1e-8,
+        :knitro_feastol => 1e-8,
+
         :verbose_bfgs => false,
-    ),
-)
-
-
-# ============================================================
-# Regularized BFGS parameter sets
-# ============================================================
-rbfgs_param_sets = Dict(
-    :root => Dict{Symbol,Any}(
-        :max_iter => 200,
-
-        :B0_scale => 1.0,
-
-        :mu0 => 1e-2,
-        :mu_min => 1e-10,
-        :mu_max => 1e4,
-        :mu_decrease => 0.2,
-        :mu_increase => 5.0,
-        :eta1 => 0.05,
-        :eta2 => 0.75,
-        :max_inner_regularization => 20,
-
-        :curvature_tol => 1e-12,
-        :damping_delta => 0.2,
-        :reset_B_on_failed_update => false,
-
-        :normalize_direction => false,
-        :max_direction_norm => 10.0,
-        :max_q_norm_inf => 20.0,
-
-        :armijo_c1 => 1e-4,
-        :accept_tol => 1e-12,
-        :alpha0 => 1.0,
-        :alpha_min => 1e-12,
-        :alpha_decay => 0.5,
-        :max_backtracks => 30,
-
-        :nonmonotone => true,
-        :nonmonotone_window => 10,
-
-        :project_spd => true,
-        :min_B_eig => 1e-8,
-        :max_B_eig => 1e8,
-        :reset_B_on_bad => true,
-        :max_B_norm => 1e8,
-
-        :grad_tol => 1e-2,
-        :step_tol => 1e-10,
-
-        :psi_margin => 1e-7,
-        :psi_floor => 0.0,
-        :psi_derivative => true,
-        :t1_reformulation => false,
-
-        :cache_digits => 12,
-        :diagnostics => false,
-        :verbose => false,
-    ),
-
-    :node => Dict{Symbol,Any}(
-        :max_iter => 30,
-
-        :B0_scale => 1.0,
-
-        :mu0 => 1e-2,
-        :mu_min => 1e-10,
-        :mu_max => 1e4,
-        :mu_decrease => 0.2,
-        :mu_increase => 5.0,
-        :eta1 => 0.05,
-        :eta2 => 0.75,
-        :max_inner_regularization => 20,
-
-        :curvature_tol => 1e-12,
-        :damping_delta => 0.2,
-        :reset_B_on_failed_update => false,
-
-        :normalize_direction => false,
-        :max_direction_norm => 10.0,
-        :max_q_norm_inf => 20.0,
-
-        :armijo_c1 => 1e-4,
-        :accept_tol => 1e-12,
-        :alpha0 => 1.0,
-        :alpha_min => 1e-12,
-        :alpha_decay => 0.5,
-        :max_backtracks => 30,
-
-        :nonmonotone => true,
-        :nonmonotone_window => 10,
-
-        :project_spd => false,
-        :min_B_eig => 1e-8,
-        :max_B_eig => 1e8,
-        :reset_B_on_bad => true,
-        :max_B_norm => 1e8,
-
-        :grad_tol => 1e-2,
-        :step_tol => 1e-10,
-
-        :psi_margin => 1e-7,
-        :psi_floor => 0.0,
-        :psi_derivative => true,
-        :t1_reformulation => false,
-
-        :cache_digits => 12,
-        :diagnostics => false,
-        :verbose => false,
     ),
 )
 
@@ -217,17 +117,21 @@ rbfgs_param_sets = Dict(
 # ============================================================
 prox_step_param_sets = Dict(
     :root => Dict{Symbol,Any}(
-        :rho => 1e-3,
+        :rho => 1e3,
 
         :theta_perturbation => 1e-2,
         :center_initial_theta => false,
 
-        :q_bound => 20.0,
+        :theta_bound => 20.0,
 
         :psi_margin => 1e-7,
         :psi_floor => 0.0,
         :psi_derivative => true,
         :t1_reformulation => false,
+
+        :relax_knitro_outlev => nothing,
+        :relax_knitro_opttol => 1e-8,
+        :relax_knitro_feastol => 1e-8,
 
         :knitro_feastol => 1e-6,
         :knitro_opttol => 1e-2,
@@ -246,7 +150,7 @@ prox_step_param_sets = Dict(
     ),
 
     :node => Dict{Symbol,Any}(
-        :rho => 1e-3,
+        :rho => 1e3,
 
         :theta_perturbation => 1e-2,
         :center_initial_theta => false,
@@ -257,6 +161,10 @@ prox_step_param_sets = Dict(
         :psi_floor => 0.0,
         :psi_derivative => true,
         :t1_reformulation => false,
+
+        :relax_knitro_outlev => nothing,
+        :relax_knitro_opttol => 1e-8,
+        :relax_knitro_feastol => 1e-8,
 
         :knitro_feastol => 1e-6,
         :knitro_opttol => 1e-2,
