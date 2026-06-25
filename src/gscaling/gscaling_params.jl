@@ -131,7 +131,7 @@ prox_step_param_sets = Dict(
 
         :relax_knitro_outlev => nothing,
         :relax_knitro_opttol => 1e-8,
-        :relax_knitro_feastol => 1e-8,
+        :relax_knitro_feastol => 1e-5,
 
         :knitro_feastol => 1e-6,
         :knitro_opttol => 1e-2,
@@ -144,7 +144,7 @@ prox_step_param_sets = Dict(
         :knitro_honorbnds => 1,
         :knitro_outlev => 0,
 
-        :cache_digits => 12,
+        :cache_digits => 6,
         :diagnostics => false,
         :verbose => false,
     ),
@@ -164,7 +164,7 @@ prox_step_param_sets = Dict(
 
         :relax_knitro_outlev => nothing,
         :relax_knitro_opttol => 1e-8,
-        :relax_knitro_feastol => 1e-8,
+        :relax_knitro_feastol => 1e-5,
 
         :knitro_feastol => 1e-6,
         :knitro_opttol => 1e-2,
@@ -177,7 +177,7 @@ prox_step_param_sets = Dict(
         :knitro_honorbnds => 1,
         :knitro_outlev => 0,
 
-        :cache_digits => 12,
+        :cache_digits => 6,
         :diagnostics => false,
         :verbose => false,
     ),

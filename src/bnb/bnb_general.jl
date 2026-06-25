@@ -1,5 +1,6 @@
 using LinearAlgebra
 using Printf
+using DataStructures: BinaryMaxHeap
 
 # =============================================================================
 # General branch-and-bound for GMESP
@@ -92,6 +93,7 @@ function _make_node_kwargs(;
     psi_margin,
     psi_floor,
     upsilon_fixing,
+    need_dual,
 )
     return (
         relaxation = relaxation,
@@ -102,6 +104,7 @@ function _make_node_kwargs(;
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
+        need_dual = need_dual,
     )
 end
 
@@ -110,17 +113,19 @@ end
 # Open-list utilities
 # =============================================================================
 
+
 function _push_if_survives!(
-    open::Vector{GMESPNode},
+    open,
     F1::Vector{Int},
     F0::Vector{Int},
     r,
     lb::Float64,
+    depth::Int,
 )
     r.determined && return false
     r.ub ≤ lb && return false
 
-    push!(open, GMESPNode(F1, F0, r.ub, r.x, r.keep, r.gamma))
+    push!(open, GMESPNode(F1, F0, r.ub, r.x, r.keep, depth, r.gamma))
 
     return true
 end
@@ -137,20 +142,45 @@ function _bound_child!(
     t::Int,
     F1::Vector{Int},
     F0::Vector{Int},
-    open::Vector{GMESPNode},
+    parent::GMESPNode,
+    open,
     state::Base.RefValue,
     counters::Base.RefValue,
     node_kwargs;
     fixing_rule::Symbol,
     atol::Float64,
+    recalibrate_k::Int,
 )
+    child_depth = parent.depth + 1
+
+    child_keep = setdiff(1:size(C, 1), F0)
+
+    recalibrate_child =
+        node_kwargs.relaxation != :DDGFactplusUpsilon ||
+        parent.gamma === nothing ||
+        child_depth % recalibrate_k == 0
+
+    fixed_gamma_child =
+        recalibrate_child || node_kwargs.relaxation != :DDGFactplusUpsilon ?
+        nothing :
+        _restrict_gamma_to_child_keep(parent.keep, parent.gamma, child_keep)
+
+    child_kwargs = merge(
+        node_kwargs,
+        (
+            calibrate_upsilon = recalibrate_child,
+            fixed_gamma = fixed_gamma_child,
+        ),
+    )
+
+    # First bound of the child.
     r = _gmesp_node(
         C,
         s,
         t,
         F1,
         F0;
-        node_kwargs...,
+        child_kwargs...,
     )
 
     cnt = counters[]
@@ -195,13 +225,29 @@ function _bound_child!(
             nfix1 = cnt.nfix1 + length(F1f) - length(F1),
         )
 
+        # Refit after variable fixing, but do not recalibrate again.
+        refit_keep = setdiff(1:size(C, 1), F0f)
+
+        refit_gamma =
+            node_kwargs.relaxation == :DDGFactplusUpsilon && r.gamma !== nothing ?
+            _restrict_gamma_to_child_keep(r.keep, r.gamma, refit_keep) :
+            nothing
+
+        refit_kwargs = merge(
+            node_kwargs,
+            (
+                calibrate_upsilon = node_kwargs.relaxation != :DDGFactplusUpsilon,
+                fixed_gamma = refit_gamma,
+            ),
+        )
+
         r = _gmesp_node(
             C,
             s,
             t,
             F1f,
             F0f;
-            node_kwargs...,
+            refit_kwargs...,
         )
 
         _register_integer_solution!(C, s, t, r, state)
@@ -223,6 +269,7 @@ function _bound_child!(
         F0,
         r,
         st.lb,
+        child_depth,
     )
 
     return nothing
@@ -260,12 +307,12 @@ end
 
 function _print_progress(
     nodes::Int,
-    open::Vector{GMESPNode},
+    open,
     nfix0::Int,
     nfix1::Int,
     lb::Float64,
 )
-    best_ub = isempty(open) ? lb : maximum(nd -> nd.ub, open)
+    best_ub = isempty(open) ? lb : first(open).ub
 
     @printf(
         "nodes = %4d  open = %4d  fix0 = %3d  fix1 = %3d  lb = %.4f  ub = %.4f  gap = %.4f\n",
@@ -369,6 +416,7 @@ function solve_bnb_ddfact(
     root_calibration_params = Dict{Symbol,Any}(),
     node_calibration_params = Dict{Symbol,Any}(),
     upsilon_fixing::Symbol = :simple,
+    recalibrate_k::Int = 1,
     atol::Float64 = 1e-8,
     psi_margin::Float64 = 1e-7,
     psi_floor::Float64 = 0.0,
@@ -376,6 +424,7 @@ function solve_bnb_ddfact(
     n = size(C, 1)
 
     @assert 1 <= t <= s < n "need 1 ≤ t ≤ s < n"
+    @assert recalibrate_k >= 1 "recalibrate_k must be at least 1"
 
     relaxation = _normalize_relaxation(relaxation)
     fixing_rule = _normalize_fixing_rule(fixing_rule)
@@ -406,6 +455,8 @@ function solve_bnb_ddfact(
         nfix1 = 0,
     ))
 
+    need_dual = fixing_rule in (:dual, :both)
+
     root_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
@@ -415,6 +466,7 @@ function solve_bnb_ddfact(
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
+        need_dual = need_dual,
     )
 
     child_node_kwargs = _make_node_kwargs(
@@ -426,6 +478,7 @@ function solve_bnb_ddfact(
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
+        need_dual = need_dual,
     )
 
     r_root = _gmesp_node(
@@ -458,10 +511,22 @@ function solve_bnb_ddfact(
         ub_root,
     )
 
-    open =
-        r_root.determined || r_root.ub ≤ st.lb ?
-        GMESPNode[] :
-        [GMESPNode(Int[], Int[], ub_root, r_root.x, r_root.keep, r_root.gamma)]
+    open = BinaryMaxHeap{GMESPNode}()
+
+    if !(r_root.determined || r_root.ub ≤ st.lb)
+        push!(
+            open,
+            GMESPNode(
+                Int[],
+                Int[],
+                ub_root,
+                r_root.x,
+                r_root.keep,
+                0,
+                r_root.gamma,
+            ),
+        )
+    end
 
     report_every = 1000
     next_report = report_every
@@ -478,14 +543,12 @@ function solve_bnb_ddfact(
         local node
 
         open_list_time = @elapsed begin
-            sort!(open; by = nd -> nd.ub, rev = true)
-
             st = state[]
 
             if first(open).ub ≤ st.lb
                 node = nothing
             else
-                node = popfirst!(open)
+                node = pop!(open)
             end
         end
 
@@ -506,12 +569,14 @@ function solve_bnb_ddfact(
             t,
             F1_child,
             node.F0,
+            node,
             open,
             state,
             counters,
             child_node_kwargs;
             fixing_rule = fixing_rule,
             atol = atol,
+            recalibrate_k = recalibrate_k,
         )
 
         F0_child = copy(node.F0)
@@ -524,12 +589,14 @@ function solve_bnb_ddfact(
             t,
             node.F1,
             F0_child,
+            node,
             open,
             state,
             counters,
             child_node_kwargs;
             fixing_rule = fixing_rule,
             atol = atol,
+            recalibrate_k = recalibrate_k,
         )
 
         cnt = counters[]
@@ -552,7 +619,7 @@ function solve_bnb_ddfact(
     cnt = counters[]
 
     tree_exhausted = isempty(open)
-    final_ub = tree_exhausted ? st.lb : maximum(nd -> nd.ub, open)
+    final_ub = tree_exhausted ? st.lb : first(open).ub
 
     status =
         time_limit_hit ?
@@ -614,6 +681,7 @@ function solve_bnb_ddfact(
         upsilon_fixing = upsilon_fixing,
         root_calibration_params = root_calibration_params,
         node_calibration_params = node_calibration_params,
+        recalibrate_k = recalibrate_k,
 
         knitro_time = get(bnb_timing, :knitro_time, 0.0),
         relaxation_solve_time = get(bnb_timing, :relaxation_solve_time, 0.0),
