@@ -3,7 +3,6 @@ using MAT
 using CSV
 using DataFrames
 using LinearAlgebra
-using Statistics
 using JuMP
 using KNITRO
 using Printf
@@ -15,7 +14,6 @@ include("../solvers/solver_knitro.jl")
 
 include("../gscaling/gscaling_util.jl")
 include("../gscaling/gscaling_bfgs.jl")
-include("../gscaling/gscaling_t1.jl")
 include("../gscaling/gscaling_prox.jl")
 include("../gscaling/gscaling_params.jl")
 
@@ -24,12 +22,12 @@ include("../misc/var_fixing.jl")
 
 include("../bnb/bnb_util.jl")
 include("../bnb/bnb_general.jl")
-include("../bnb/bnb_t1_plus.jl")
 
 
 # ============================================================
 # Choose instance
 # ============================================================
+
 data_n = 63
 k = 32
 
@@ -50,17 +48,23 @@ n = size(C, 1)
 # ============================================================
 # B&B reformulations / calibration algorithms
 # ============================================================
+#
 # We solve:
-#   1 row: DDGFact
+#
 #   1 row: DDGFactplus
-#   5 rows: DDGFactplusUpsilon with prox_step and recalibrate_k = 1:5
+#
+#   6 rows: DDGFactplusUpsilon with BFGS
+#   6 rows: DDGFactplusUpsilon with one PPA iteration
+#   6 rows: DDGFactplusUpsilon with full PPA
+#
+# Each Upsilon method is tested with recalibrate_k in [1, 2, 4, 6, 8, 10].
+#
+# ============================================================
+
+recalibrate_k_values = [1, 2, 4, 6, 8, 10]
+
 runs = vcat(
     [
-        # (
-        #     relaxation = DDGFact,
-        #     calibration_method = :none,
-        #     recalibrate_k = missing,
-        # ),
         (
             relaxation = DDGFactplus,
             calibration_method = :none,
@@ -70,25 +74,19 @@ runs = vcat(
     [
         (
             relaxation = DDGFactplusUpsilon,
-            calibration_method = :prox_step,
+            calibration_method = method,
             recalibrate_k = kk,
         )
-        for kk in 1:5
+        for method in [:bfgs, :ppa_one, :ppa_full]
+        for kk in recalibrate_k_values
     ],
 )
 
 
 # ============================================================
-# DDGFactplus t = 1 special B&B option
-# ============================================================
-# If true and t == 1, DDGFactplus is solved with solve_bnb_ddgfactplus_t1.
-# Otherwise, DDGFactplus is solved with the general B&B.
-use_t1_plus_bnb = true
-
-
-# ============================================================
 # General B&B parameters
 # ============================================================
+
 # Options:
 #   :none
 #   :dual
@@ -96,7 +94,7 @@ use_t1_plus_bnb = true
 #   :both
 #
 # For DDGFact, only :none and :dual are supported.
-fixing_rule = :primal
+fixing_rule = :dual
 
 # Options:
 #   :simple
@@ -107,28 +105,52 @@ upsilon_fixing = :simple
 
 
 # ============================================================
-# Upsilon prox-step calibration parameter sets
+# Calibration parameter-set labels
 # ============================================================
-# Used only for relaxation = DDGFactplusUpsilon.
-root_prox_step_param_label = :root
-node_prox_step_param_label = :node
+
+root_bfgs_param_label = :default
+node_bfgs_param_label = :very_fast
+
+root_ppa_one_param_label = :root
+node_ppa_one_param_label = :node
+
+root_ppa_full_param_label = :root
+node_ppa_full_param_label = :node
 
 
 function _calibration_config(method::Symbol)
-    if method == :prox_step
+    if method == :bfgs
         return (
-            solver_method = :prox_step,
-            root_params = copy(prox_step_param_sets[root_prox_step_param_label]),
-            node_params = copy(prox_step_param_sets[node_prox_step_param_label]),
-            root_label = root_prox_step_param_label,
-            node_label = node_prox_step_param_label,
+            solver_method = :bfgs,
+            root_params = copy(bfgs_param_sets[root_bfgs_param_label]),
+            node_params = copy(bfgs_param_sets[node_bfgs_param_label]),
+            root_label = root_bfgs_param_label,
+            node_label = node_bfgs_param_label,
+        )
+
+    elseif method == :ppa_one
+        return (
+            solver_method = :ppa_one,
+            root_params = copy(ppa_one_param_sets[root_ppa_one_param_label]),
+            node_params = copy(ppa_one_param_sets[node_ppa_one_param_label]),
+            root_label = root_ppa_one_param_label,
+            node_label = node_ppa_one_param_label,
+        )
+
+    elseif method == :ppa_full
+        return (
+            solver_method = :ppa_full,
+            root_params = copy(ppa_full_param_sets[root_ppa_full_param_label]),
+            node_params = copy(ppa_full_param_sets[node_ppa_full_param_label]),
+            root_label = root_ppa_full_param_label,
+            node_label = node_ppa_full_param_label,
         )
 
     elseif method == :none
         # The calibration method is ignored for DDGFact and DDGFactplus,
         # but solve_bnb_ddfact still expects a supported Upsilon method.
         return (
-            solver_method = :prox_step,
+            solver_method = :ppa_one,
             root_params = Dict{Symbol,Any}(),
             node_params = Dict{Symbol,Any}(),
             root_label = :none,
@@ -136,7 +158,10 @@ function _calibration_config(method::Symbol)
         )
 
     else
-        error("Unknown calibration method: $method. This runner only uses :prox_step for Upsilon.")
+        error(
+            "Unknown calibration method: $method. " *
+            "Expected :none, :bfgs, :ppa_one, or :ppa_full."
+        )
     end
 end
 
@@ -144,10 +169,12 @@ end
 # ============================================================
 # Common parameters
 # ============================================================
+
 Random.seed!(1)
 
 time_limit = 7200.0
 # time_limit = 86400.0
+
 verbose_bnb = false
 atol = 1e-10
 
@@ -159,10 +186,11 @@ psi_floor = 0.0
 # ============================================================
 # CSV output
 # ============================================================
+
 mkpath("results")
 
 results_filepath =
-    "results/bnb_prox_knitro_recalib_k_data$(data_n)_n$(n)_s$(s)_t$(t)_heap.csv"
+    "results/bnb_data$(data_n)_n$(n)_s$(s)_t$(t).csv"
 
 cols = [
     :data_n,
@@ -170,7 +198,7 @@ cols = [
     :s,
     :t,
 
-    # Reformulation / solver choices
+    # Reformulation / solver choices.
     :relaxation,
     :solver_used,
     :fixing_rule,
@@ -178,14 +206,13 @@ cols = [
     :root_calibration_param_set,
     :node_calibration_param_set,
     :upsilon_fixing,
-    :use_t1_plus_bnb,
     :recalibrate_k,
 
-    # B&B gaps
+    # B&B gaps.
     :bnb_gap,
     :bnb_root_gap,
 
-    # Runtimes
+    # Runtimes.
     :bnb_runtime,
     :bnb_reported_wall_time,
     :bnb_knitro_time,
@@ -200,45 +227,46 @@ cols = [
     :bnb_variable_fixing_time,
     :bnb_variable_fixing_calls,
 
-    # B&B variable fixing / branching counts
+    # B&B variable fixing / branching counts.
     :n_fixed_zero_bnb,
     :n_fixed_one_bnb,
     :n_fixed_total_bnb,
 
-    # B&B tree diagnostics
+    # B&B tree diagnostics.
     :bnb_nodes,
     :bnb_n_int_sols,
     :bnb_tree_exhausted,
     :bnb_time_limit_hit,
 
-    # B&B integrality-gap diagnostics
+    # B&B integrality-gap diagnostics.
     :bnb_int_gap_max,
     :bnb_int_gap_avg,
     :bnb_int_gap_opt,
 
-    # Objective values
+    # Objective values.
     :z_bnb,
     :z_bnb_ub,
     :z_bnb_root_ub,
-
-    # DDGFactplus parameter, if available
-    :psi,
 ]
 
 CSV.write(results_filepath, DataFrame([c => Any[] for c in cols]))
 
 
 println("="^82)
-println("GMESP B&B test: DDGFact, DDGFactplus, and prox-step-Upsilon with recalibrate_k = 1:5")
+println("GMESP B&B test: DDGFactplus, BFGS-Upsilon, one-PPA-Upsilon, full-PPA-Upsilon")
 println("data_n:                         $data_n")
 println("n:                              $n")
 println("s:                              $s")
 println("t:                              $t")
-println("use_t1_plus_bnb:                $use_t1_plus_bnb")
 println("fixing_rule:                    $fixing_rule")
 println("upsilon_fixing:                 $upsilon_fixing")
-println("root_prox_step_param_set:       $root_prox_step_param_label")
-println("node_prox_step_param_set:       $node_prox_step_param_label")
+println("root_bfgs_param_set:            $root_bfgs_param_label")
+println("node_bfgs_param_set:            $node_bfgs_param_label")
+println("root_ppa_one_param_set:         $root_ppa_one_param_label")
+println("node_ppa_one_param_set:         $node_ppa_one_param_label")
+println("root_ppa_full_param_set:        $root_ppa_full_param_label")
+println("node_ppa_full_param_set:        $node_ppa_full_param_label")
+println("recalibrate_k_values:           $recalibrate_k_values")
 println("time_limit:                     $time_limit")
 println("results_filepath:               $results_filepath")
 println("="^82)
@@ -248,6 +276,7 @@ flush(stdout)
 # ============================================================
 # Run all reformulations / calibration settings
 # ============================================================
+
 results = []
 
 for run in runs
@@ -281,61 +310,44 @@ for run in runs
         fixing_rule
 
     runtime = @elapsed begin
-        if relaxation == DDGFactplus && t == 1 && use_t1_plus_bnb
-            solver_used = :t1_plus
-
-            S_best, st = solve_bnb_ddgfactplus_t1(
+        if relaxation == DDGFactplusUpsilon
+            S_best, st = solve_bnb_ddfact(
                 C,
-                s;
+                s,
+                t;
+                relaxation = relaxation,
+                fixing_rule = local_fixing_rule,
                 psi = psi,
                 time_limit = time_limit,
                 verbose = verbose_bnb,
+                calibration_method = cfg.solver_method,
+                root_calibration_params = cfg.root_params,
+                node_calibration_params = cfg.node_params,
+                upsilon_fixing = upsilon_fixing,
+                recalibrate_k = recalibrate_k_run,
                 atol = atol,
                 psi_margin = psi_margin,
                 psi_floor = psi_floor,
             )
         else
-            solver_used = :general
-
-            if relaxation == DDGFactplusUpsilon
-                S_best, st = solve_bnb_ddfact(
-                    C,
-                    s,
-                    t;
-                    relaxation = relaxation,
-                    fixing_rule = local_fixing_rule,
-                    psi = psi,
-                    time_limit = time_limit,
-                    verbose = verbose_bnb,
-                    calibration_method = cfg.solver_method,
-                    root_calibration_params = cfg.root_params,
-                    node_calibration_params = cfg.node_params,
-                    upsilon_fixing = upsilon_fixing,
-                    recalibrate_k = recalibrate_k_run,
-                    atol = atol,
-                    psi_margin = psi_margin,
-                    psi_floor = psi_floor,
-                )
-            else
-                # For DDGFact and DDGFactplus, recalibrate_k is irrelevant.
-                S_best, st = solve_bnb_ddfact(
-                    C,
-                    s,
-                    t;
-                    relaxation = relaxation,
-                    fixing_rule = local_fixing_rule,
-                    psi = psi,
-                    time_limit = time_limit,
-                    verbose = verbose_bnb,
-                    calibration_method = cfg.solver_method,
-                    root_calibration_params = cfg.root_params,
-                    node_calibration_params = cfg.node_params,
-                    upsilon_fixing = upsilon_fixing,
-                    atol = atol,
-                    psi_margin = psi_margin,
-                    psi_floor = psi_floor,
-                )
-            end
+            # For DDGFact and DDGFactplus, recalibrate_k is irrelevant.
+            S_best, st = solve_bnb_ddfact(
+                C,
+                s,
+                t;
+                relaxation = relaxation,
+                fixing_rule = local_fixing_rule,
+                psi = psi,
+                time_limit = time_limit,
+                verbose = verbose_bnb,
+                calibration_method = cfg.solver_method,
+                root_calibration_params = cfg.root_params,
+                node_calibration_params = cfg.node_params,
+                upsilon_fixing = upsilon_fixing,
+                atol = atol,
+                psi_margin = psi_margin,
+                psi_floor = psi_floor,
+            )
         end
     end
 
@@ -345,27 +357,38 @@ for run in runs
 
     bnb_root_gap = st.root_ub - st.lb
 
-    bnb_n_int_sols = hasproperty(st, :n_int_sols) ? st.n_int_sols : missing
-    bnb_int_gap_max = hasproperty(st, :int_gap_max) ? st.int_gap_max : missing
-    bnb_int_gap_avg = hasproperty(st, :int_gap_avg) ? st.int_gap_avg : missing
-    bnb_int_gap_opt = hasproperty(st, :int_gap_opt) ? st.int_gap_opt : missing
+    bnb_n_int_sols =
+        hasproperty(st, :n_int_sols) ? st.n_int_sols : missing
 
-    psi_out = hasproperty(st, :psi) ? st.psi : missing
+    bnb_int_gap_max =
+        hasproperty(st, :int_gap_max) ? st.int_gap_max : missing
+
+    bnb_int_gap_avg =
+        hasproperty(st, :int_gap_avg) ? st.int_gap_avg : missing
+
+    bnb_int_gap_opt =
+        hasproperty(st, :int_gap_opt) ? st.int_gap_opt : missing
 
     bnb_knitro_time =
         hasproperty(st, :knitro_time) ? st.knitro_time : missing
 
     bnb_relaxation_solve_time =
-        hasproperty(st, :relaxation_solve_time) ? st.relaxation_solve_time : missing
+        hasproperty(st, :relaxation_solve_time) ?
+        st.relaxation_solve_time :
+        missing
 
     bnb_upsilon_calibration_time =
-        hasproperty(st, :upsilon_calibration_time) ? st.upsilon_calibration_time : missing
+        hasproperty(st, :upsilon_calibration_time) ?
+        st.upsilon_calibration_time :
+        missing
 
     bnb_factorization_time =
         hasproperty(st, :factorization_time) ? st.factorization_time : missing
 
     bnb_bound_computation_time =
-        hasproperty(st, :bound_computation_time) ? st.bound_computation_time : missing
+        hasproperty(st, :bound_computation_time) ?
+        st.bound_computation_time :
+        missing
 
     bnb_open_list_time =
         hasproperty(st, :open_list_time) ? st.open_list_time : missing
@@ -377,13 +400,19 @@ for run in runs
         hasproperty(st, :dual_solution_time) ? st.dual_solution_time : missing
 
     bnb_variable_fixing_direct_time =
-        hasproperty(st, :variable_fixing_direct_time) ? st.variable_fixing_direct_time : missing
+        hasproperty(st, :variable_fixing_direct_time) ?
+        st.variable_fixing_direct_time :
+        missing
 
     bnb_variable_fixing_time =
-        hasproperty(st, :variable_fixing_time) ? st.variable_fixing_time : missing
+        hasproperty(st, :variable_fixing_time) ?
+        st.variable_fixing_time :
+        missing
 
     bnb_variable_fixing_calls =
-        hasproperty(st, :variable_fixing_calls) ? st.variable_fixing_calls : missing
+        hasproperty(st, :variable_fixing_calls) ?
+        st.variable_fixing_calls :
+        missing
 
     calibration_method_out =
         relaxation == DDGFactplusUpsilon ?
@@ -408,7 +437,6 @@ for run in runs
         String(cfg.root_label),
         String(cfg.node_label),
         String(upsilon_fixing),
-        use_t1_plus_bnb,
         recalibrate_k_out,
 
         st.gap,
@@ -444,8 +472,6 @@ for run in runs
         st.lb,
         st.ub,
         st.root_ub,
-
-        psi_out,
     ]
 
     push!(
@@ -554,10 +580,6 @@ for run in runs
         println("upsilon_fixing:                    ", st.upsilon_fixing)
     end
 
-    if hasproperty(st, :psi)
-        println("psi:                               ", st.psi)
-    end
-
     println("Appended row to:                   ", results_filepath)
     flush(stdout)
 end
@@ -566,6 +588,7 @@ end
 # ============================================================
 # Final in-memory table
 # ============================================================
+
 df = DataFrame(
     [Symbol(cols[j]) => [r.row[j] for r in results] for j in eachindex(cols)]
 )
@@ -574,6 +597,7 @@ df = DataFrame(
 # ============================================================
 # Summary
 # ============================================================
+
 println()
 println("="^82)
 println("Summary")

@@ -293,99 +293,6 @@ function _prox_knitro_status_is_acceptable(term_stat, primal_stat)
 end
 
 
-function _prox_projected_gradient_residual(
-    theta::Vector{Float64},
-    grad::Vector{Float64},
-    theta_bound::Float64,
-)
-    if isfinite(theta_bound)
-        projected = clamp.(theta .- grad, -theta_bound, theta_bound)
-        residual = theta .- projected
-        return norm(residual), norm(residual, Inf), residual
-    else
-        return norm(grad), norm(grad, Inf), copy(grad)
-    end
-end
-
-
-function _prox_eval_prox_point!(
-    cache::Dict{String,Any},
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    theta::Vector{Float64},
-    theta_center::Vector{Float64},
-    s::Int,
-    t::Int;
-    J1::AbstractVector{<:Integer},
-    J0::AbstractVector{<:Integer},
-    rho::Float64,
-    theta_bound::Float64,
-    atol::Float64,
-    psi_margin::Float64,
-    psi_floor::Float64,
-    psi_derivative::Bool,
-    t1_reformulation::Bool,
-    cache_digits::Int,
-    counters::Union{Nothing,ProxEvalCounters} = nothing,
-    warm_start_state = nothing,
-    relax_knitro_outlev::Union{Nothing,Int} = nothing,
-    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
-    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
-)
-    theta_eval = _prox_project_theta(theta, theta_bound)
-
-    val = _prox_eval_original_oracle_cached!(
-        cache,
-        C,
-        theta_eval,
-        s,
-        t;
-        J1 = J1,
-        J0 = J0,
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        t1_reformulation = t1_reformulation,
-        cache_digits = cache_digits,
-        counters = counters,
-        warm_start_state = warm_start_state,
-        relax_knitro_outlev = relax_knitro_outlev,
-        relax_knitro_opttol = relax_knitro_opttol,
-        relax_knitro_feastol = relax_knitro_feastol,
-    )
-
-    g = _prox_get_subgradient!(
-        C,
-        val,
-        s,
-        t;
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
-        counters = counters,
-    )
-
-    prox_grad = g .+ (1.0 / rho) .* (theta_eval .- theta_center)
-
-    prox_obj =
-        val.obj +
-        (0.5 / rho) * sum((theta_eval[i] - theta_center[i])^2 for i in eachindex(theta_eval))
-
-    res_norm, res_norm_inf, res_vec =
-        _prox_projected_gradient_residual(theta_eval, prox_grad, theta_bound)
-
-    return (
-        theta = theta_eval,
-        val = val,
-        prox_grad = prox_grad,
-        prox_obj = prox_obj,
-        residual = res_vec,
-        residual_norm = res_norm,
-        residual_norm_inf = res_norm_inf,
-    )
-end
-
-
 # =============================================================================
 # Knitro proximal subproblem
 # =============================================================================
@@ -587,21 +494,17 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
         theta_new .= clamp.(theta_new, -theta_bound, theta_bound)
     end
 
-    eval_new = _prox_eval_prox_point!(
+    final_val = _prox_eval_original_oracle_cached!(
         cache,
         C,
         theta_new,
-        theta_center,
         s,
         t;
         J1 = J1,
         J0 = J0,
-        rho = rho,
-        theta_bound = theta_bound,
         atol = atol,
         psi_margin = psi_margin,
         psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
         t1_reformulation = t1_reformulation,
         cache_digits = cache_digits,
         counters = counters,
@@ -611,27 +514,26 @@ function _solve_original_upsilon_prox_subproblem_knitro!(
         relax_knitro_feastol = relax_knitro_feastol,
     )
 
+    prox_obj =
+        final_val.obj +
+        (0.5 / rho) * sum((theta_new[i] - theta_center[i])^2 for i in 1:n)
+
     return (
-        theta = eval_new.theta,
-        val = eval_new.val,
-        prox_obj = eval_new.prox_obj,
+        theta = theta_new,
+        val = final_val,
+        prox_obj = prox_obj,
         status = term_stat,
         primal_status = primal_stat,
         acceptable_status = _prox_knitro_status_is_acceptable(term_stat, primal_stat),
-        inner_iters = 0,
-        residual_norm = eval_new.residual_norm,
-        residual_norm_inf = eval_new.residual_norm_inf,
-        last_inner_step_norm = NaN,
-        last_inner_step_norm_inf = NaN,
     )
 end
 
 
 # =============================================================================
-# One-step proximal calibration
+# DDGFactplus_Upsilon PPA calibration with psi = psi(gamma)
 # =============================================================================
 
-function solve_one_step_proximal_knitro_upsilon_calibration(
+function calibrate_upsilon_ppa_ddfactplus(
     C,
     s::Int,
     t::Int;
@@ -639,389 +541,22 @@ function solve_one_step_proximal_knitro_upsilon_calibration(
     J0::AbstractVector{<:Integer} = Int[],
     theta0::Union{Nothing,Vector{Float64}} = nothing,
 
-    # Proximal parameter.
-    rho::Float64 = 1e-2,
-
-    # Initialization.
-    theta_perturbation::Float64 = 1e-4,
-    center_initial_theta::Bool = false,
-
-    # Bounds.
-    theta_bound::Float64 = 20.0,
-
-    # Original DDGFact+_Upsilon oracle options.
-    psi_margin::Float64 = 1e-8,
-    psi_floor::Float64 = 0.0,
-    psi_derivative::Bool = true,
-    t1_reformulation::Bool = true,
-    atol::Float64 = 1e-10,
-
-    # DDGFact+_Upsilon relaxation solver tolerances.
-    relax_knitro_outlev::Union{Nothing,Int} = nothing,
-    relax_knitro_opttol::Union{Nothing,Float64} = nothing,
-    relax_knitro_feastol::Union{Nothing,Float64} = nothing,
-
-    # Knitro subproblem tolerances.
-    knitro_feastol::Float64 = 1e-8,
-    knitro_opttol::Float64 = 1e-6,
-    knitro_xtol::Float64 = 1e-10,
-    knitro_ftol::Float64 = 1e-12,
-    knitro_maxtime_real::Float64 = Inf,
-    knitro_algorithm::Union{Nothing,Int} = nothing,
-    knitro_bar_murule::Union{Nothing,Int} = nothing,
-    knitro_honorbnds::Union{Nothing,Int} = 1,
-    knitro_outlev::Int = 0,
-
-    # Cache / output.
-    cache_digits::Int = 12,
-    diagnostics::Bool = false,
-    verbose::Bool = true,
-)
-    Csym = _prox_sym(C)
-    n = size(Csym, 1)
-
-    J1 = sort(unique(collect(J1)))
-    J0 = sort(unique(collect(J0)))
-
-    @assert all(i -> 1 <= i <= n, J1)
-    @assert all(i -> 1 <= i <= n, J0)
-    @assert isempty(intersect(J1, J0))
-    @assert length(J1) <= s
-    @assert s <= n - length(J0)
-    @assert 1 <= t <= s <= n
-    @assert rho > 0.0
-
-    theta_center = if theta0 !== nothing
-        copy(theta0)
-    elseif theta_perturbation == 0.0
-        zeros(n)
-    else
-        theta_perturbation .* randn(n)
-    end
-
-    if length(theta_center) != n
-        error("theta0 must have length equal to size(C, 1).")
-    end
-
-    if center_initial_theta
-        theta_center .-= mean(theta_center)
-    end
-
-    theta_center = _prox_project_theta(theta_center, theta_bound)
-
-    cache = Dict{String,Any}()
-    counters = ProxEvalCounters()
-
-    unscaled_val = _prox_eval_original_oracle_cached!(
-        cache,
-        Csym,
-        zeros(n),
-        s,
-        t;
-        J1 = J1,
-        J0 = J0,
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        t1_reformulation = t1_reformulation,
-        cache_digits = cache_digits,
-        counters = counters,
-        relax_knitro_outlev = relax_knitro_outlev,
-        relax_knitro_opttol = relax_knitro_opttol,
-        relax_knitro_feastol = relax_knitro_feastol,
-    )
-
-    initial_val = _prox_eval_original_oracle_cached!(
-        cache,
-        Csym,
-        theta_center,
-        s,
-        t;
-        J1 = J1,
-        J0 = J0,
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        t1_reformulation = t1_reformulation,
-        cache_digits = cache_digits,
-        counters = counters,
-        relax_knitro_outlev = relax_knitro_outlev,
-        relax_knitro_opttol = relax_knitro_opttol,
-        relax_knitro_feastol = relax_knitro_feastol,
-    )
-
-    label = "OneStep-Prox-Knitro-Upsilon"
-
-    if verbose
-        initial_g = _prox_get_subgradient!(
-            Csym,
-            initial_val,
-            s,
-            t;
-            atol = atol,
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-            psi_derivative = psi_derivative,
-            counters = counters,
-        )
-
-        @printf(
-            "%s init | obj = %.12e | unscaled = %.12e | psi = %.6e | ||grad V|| = %.3e | gamma [%.4e, %.4e]\n",
-            label,
-            initial_val.obj,
-            unscaled_val.obj,
-            initial_val.psi,
-            norm(initial_g),
-            minimum(initial_val.gamma),
-            maximum(initial_val.gamma),
-        )
-        flush(stdout)
-    end
-
-    sub = _solve_original_upsilon_prox_subproblem_knitro!(
-        cache,
-        Csym,
-        theta_center,
-        s,
-        t;
-        J1 = J1,
-        J0 = J0,
-        rho = rho,
-        theta_bound = theta_bound,
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
-        t1_reformulation = t1_reformulation,
-        cache_digits = cache_digits,
-        counters = counters,
-
-        relax_knitro_outlev = relax_knitro_outlev,
-        relax_knitro_opttol = relax_knitro_opttol,
-        relax_knitro_feastol = relax_knitro_feastol,
-
-        knitro_feastol = knitro_feastol,
-        knitro_opttol = knitro_opttol,
-        knitro_xtol = knitro_xtol,
-        knitro_ftol = knitro_ftol,
-        knitro_maxtime_real = knitro_maxtime_real,
-        knitro_algorithm = knitro_algorithm,
-        knitro_bar_murule = knitro_bar_murule,
-        knitro_honorbnds = knitro_honorbnds,
-        knitro_outlev = knitro_outlev,
-
-        verbose = verbose,
-    )
-
-    final_theta = copy(sub.theta)
-    final_val = sub.val
-
-    step_vec = final_theta .- theta_center
-    step_norm = norm(step_vec)
-    step_norm_inf = norm(step_vec, Inf)
-
-    final_g = _prox_get_subgradient!(
-        Csym,
-        final_val,
-        s,
-        t;
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
-        counters = counters,
-    )
-
-    final_original_grad_norm = norm(final_g)
-    final_original_grad_norm_inf = norm(final_g, Inf)
-
-    hist = diagnostics ? Any[] : nothing
-
-    if diagnostics
-        push!(
-            hist,
-            (
-                prox_iter = 1,
-                obj = final_val.obj,
-                prox_obj = sub.prox_obj,
-                psi = final_val.psi,
-                lambda_min = final_val.lambda_min,
-                original_grad_norm = final_original_grad_norm,
-                original_grad_norm_inf = final_original_grad_norm_inf,
-                step_norm = step_norm,
-                step_norm_inf = step_norm_inf,
-                gamma_min = minimum(final_val.gamma),
-                gamma_max = maximum(final_val.gamma),
-                theta_norm = norm(final_theta),
-                theta_norm_inf = norm(final_theta, Inf),
-                status = sub.status,
-                primal_status = sub.primal_status,
-                acceptable_status = sub.acceptable_status,
-                subproblem_residual_norm = sub.residual_norm,
-                subproblem_residual_norm_inf = sub.residual_norm_inf,
-                cache_size = length(cache),
-                num_objective_solves = counters.num_objective_solves,
-                num_subgradient_evals = counters.num_subgradient_evals,
-                num_objective_oracle_requests =
-                    counters.num_objective_oracle_requests,
-                num_objective_cache_hits =
-                    counters.num_objective_cache_hits,
-                objective_cache_hit_rate =
-                    counters.num_objective_oracle_requests == 0 ?
-                    0.0 :
-                    counters.num_objective_cache_hits /
-                    counters.num_objective_oracle_requests,
-
-                num_subgradient_requests =
-                    counters.num_subgradient_requests,
-                num_subgradient_cache_hits =
-                    counters.num_subgradient_cache_hits,
-                subgradient_cache_hit_rate =
-                    counters.num_subgradient_requests == 0 ?
-                    0.0 :
-                    counters.num_subgradient_cache_hits /
-                    counters.num_subgradient_requests,
-            ),
-        )
-    end
-
-    status_history = Any[
-        (
-            prox_iter = 1,
-            status = sub.status,
-            primal_status = sub.primal_status,
-            acceptable_status = sub.acceptable_status,
-            prox_obj = sub.prox_obj,
-            step_norm = step_norm,
-            step_norm_inf = step_norm_inf,
-            subproblem_residual_norm = sub.residual_norm,
-            subproblem_residual_norm_inf = sub.residual_norm_inf,
-        ),
-    ]
-
-    if verbose
-        @printf(
-            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | prox_obj = %.12e | psi = %.6e | ||grad V|| = %.3e | step = %.3e | step_inf = %.3e | subres_inf = %.3e | sub_ok = %s | status = %s | gamma [%.4e, %.4e] | cache = %d | obj_solves = %d | grad_evals = %d\n",
-            label,
-            final_val.obj,
-            unscaled_val.obj,
-            string(final_val.obj < unscaled_val.obj),
-            sub.prox_obj,
-            final_val.psi,
-            final_original_grad_norm,
-            step_norm,
-            step_norm_inf,
-            sub.residual_norm_inf,
-            string(sub.acceptable_status),
-            string(sub.status),
-            minimum(final_val.gamma),
-            maximum(final_val.gamma),
-            length(cache),
-            counters.num_objective_solves,
-            counters.num_subgradient_evals,
-        )
-        flush(stdout)
-    end
-
-    return (
-        gamma = final_val.gamma,
-        theta = final_theta,
-        psi = final_val.psi,
-        lambda_min = final_val.lambda_min,
-        x = final_val.x,
-        y = final_val.y,
-        z = final_val.obj,
-        obj = final_val.obj,
-
-        best_ub = final_val.obj,
-        best_gamma = final_val.gamma,
-        best_psi = final_val.psi,
-        best_lambda_min_S = final_val.lambda_min,
-        best_min_gamma = minimum(final_val.gamma),
-        best_max_gamma = maximum(final_val.gamma),
-
-        best_eval = final_val,
-        final_eval = final_val,
-        history = hist,
-        status_history = status_history,
-
-        initial_obj = initial_val.obj,
-        initial_gamma = initial_val.gamma,
-        initial_theta = theta_center,
-        initial_psi = initial_val.psi,
-
-        unscaled_obj = unscaled_val.obj,
-        unscaled_gamma = unscaled_val.gamma,
-        unscaled_psi = unscaled_val.psi,
-        improved = final_val.obj < unscaled_val.obj,
-
-        cache_size = length(cache),
-        num_objective_solves = counters.num_objective_solves,
-        num_subgradient_evals = counters.num_subgradient_evals,
-        num_objective_oracle_requests =
-            counters.num_objective_oracle_requests,
-        num_objective_cache_hits =
-            counters.num_objective_cache_hits,
-        objective_cache_hit_rate =
-            counters.num_objective_oracle_requests == 0 ?
-            0.0 :
-            counters.num_objective_cache_hits /
-            counters.num_objective_oracle_requests,
-
-        num_subgradient_requests =
-            counters.num_subgradient_requests,
-        num_subgradient_cache_hits =
-            counters.num_subgradient_cache_hits,
-        subgradient_cache_hit_rate =
-            counters.num_subgradient_requests == 0 ?
-            0.0 :
-            counters.num_subgradient_cache_hits /
-            counters.num_subgradient_requests,
-        prox_iters = 1,
-        rho = rho,
-        prox_subproblem_solver = :knitro_one_step,
-        stop_reason = "one_proximal_step",
-
-        final_original_grad_norm = final_original_grad_norm,
-        final_original_grad_norm_inf = final_original_grad_norm_inf,
-
-        last_prox_obj = sub.prox_obj,
-        last_prox_obj_change = missing,
-
-        last_step_norm = step_norm,
-        last_step_norm_inf = step_norm_inf,
-
-        last_inner_iters = sub.inner_iters,
-        last_subproblem_residual_norm = sub.residual_norm,
-        last_subproblem_residual_norm_inf = sub.residual_norm_inf,
-        last_subproblem_acceptable_status = sub.acceptable_status,
-
-        knitro_status = sub.status,
-        knitro_primal_status = sub.primal_status,
-    )
-end
-
-
-# =============================================================================
-# Public solver
-# =============================================================================
-
-function solve_proximal_knitro_upsilon_calibration(
-    C,
-    s::Int,
-    t::Int;
-    J1::AbstractVector{<:Integer} = Int[],
-    J0::AbstractVector{<:Integer} = Int[],
-    theta0::Union{Nothing,Vector{Float64}} = nothing,
+    # Number of PPA iterations.
+    #
+    # k = 1   : one proximal step.
+    # k = m   : up to m proximal steps.
+    # k = Inf : run until convergence.
+    k::Real = 1,
 
     # Proximal parameter.
     rho::Float64 = 1e-2,
 
-    # Outer stopping tolerances.
+    # Full PPA stopping tolerances, used when k = Inf.
+    grad_tol::Float64 = 1e-6,
     prox_obj_abs_tol::Float64 = 1e-10,
     prox_step_tol::Float64 = 1e-16,
 
-    # Optional wall-time safeguard. This is not an iteration limit.
+    # Optional wall-time safeguard.
     max_wall_time::Float64 = Inf,
 
     # Initialization.
@@ -1072,8 +607,13 @@ function solve_proximal_knitro_upsilon_calibration(
     @assert s <= n - length(J0)
     @assert 1 <= t <= s <= n
     @assert rho > 0.0
+    @assert grad_tol >= 0.0
     @assert prox_obj_abs_tol >= 0.0
     @assert prox_step_tol >= 0.0
+    @assert k == Inf || (isfinite(k) && k >= 1 && isinteger(k))
+
+    run_until_convergence = (k == Inf)
+    max_ppa_iters = run_until_convergence ? typemax(Int) : Int(k)
 
     theta = if theta0 !== nothing
         copy(theta0)
@@ -1134,23 +674,6 @@ function solve_proximal_knitro_upsilon_calibration(
         relax_knitro_feastol = relax_knitro_feastol,
     )
 
-    best_val = current_val
-    best_theta = copy(theta)
-
-    hist = diagnostics ? Any[] : nothing
-    status_history = Any[]
-
-    t_start = time()
-    prox_iter = 0
-    stop_reason = ""
-
-    previous_prox_obj = Inf
-
-    last_prox_obj = Inf
-    last_prox_obj_change = Inf
-    last_step_norm = Inf
-    last_step_norm_inf = Inf
-
     current_g = _prox_get_subgradient!(
         Csym,
         current_val,
@@ -1163,38 +686,53 @@ function solve_proximal_knitro_upsilon_calibration(
         counters = counters,
     )
 
-    last_original_grad_norm = norm(current_g)
-    last_original_grad_norm_inf = norm(current_g, Inf)
+    current_grad_norm = norm(current_g)
 
-    last_inner_iters = 0
-    last_subproblem_residual_norm = Inf
-    last_subproblem_residual_norm_inf = Inf
-    last_subproblem_acceptable_status = false
+    best_val = current_val
+    best_theta = copy(theta)
 
-    label = "Prox-Knitro-Upsilon"
+    history = diagnostics ? Any[] : nothing
+    status_history = Any[]
+
+    label = "PPA-DDGFactplus-Upsilon"
 
     if verbose
         @printf(
-            "%s init | obj = %.12e | unscaled = %.12e | psi = %.6e | ||grad V|| = %.3e | gamma [%.4e, %.4e]\n",
+            "%s init | obj = %.12e | unscaled = %.12e | psi = %.6e | ||grad|| = %.3e | gamma [%.4e, %.4e]\n",
             label,
             current_val.obj,
             unscaled_val.obj,
             current_val.psi,
-            last_original_grad_norm,
+            current_grad_norm,
             minimum(current_val.gamma),
             maximum(current_val.gamma),
         )
         flush(stdout)
     end
 
-    while stop_reason == ""
+    t_start = time()
+    stop_reason = ""
+    ppa_iter = 0
+
+    previous_prox_obj = Inf
+    last_prox_obj = Inf
+    last_prox_obj_change = Inf
+
+    last_status = missing
+    last_primal_status = missing
+    last_acceptable_status = false
+
+    if run_until_convergence && current_grad_norm <= grad_tol
+        stop_reason = "grad_tol"
+    end
+
+    while stop_reason == "" && ppa_iter < max_ppa_iters
         if time() - t_start >= max_wall_time
-            stop_reason = "max_wall_time reached"
+            stop_reason = "max_wall_time"
             break
         end
 
-        prox_iter += 1
-
+        ppa_iter += 1
         theta_center = copy(theta)
 
         sub = _solve_original_upsilon_prox_subproblem_knitro!(
@@ -1240,16 +778,6 @@ function solve_proximal_knitro_upsilon_calibration(
             best_theta = copy(theta)
         end
 
-        step_vec = theta .- theta_center
-        step_norm = norm(step_vec)
-        step_norm_inf = norm(step_vec, Inf)
-
-        prox_obj = sub.prox_obj
-        prox_obj_change =
-            isfinite(previous_prox_obj) ?
-            abs(prox_obj - previous_prox_obj) :
-            Inf
-
         current_g = _prox_get_subgradient!(
             Csym,
             current_val,
@@ -1262,66 +790,45 @@ function solve_proximal_knitro_upsilon_calibration(
             counters = counters,
         )
 
-        original_grad_norm = norm(current_g)
-        original_grad_norm_inf = norm(current_g, Inf)
+        current_grad_norm = norm(current_g)
+
+        step_norm = norm(theta .- theta_center)
+
+        prox_obj = sub.prox_obj
+        prox_obj_change =
+            isfinite(previous_prox_obj) ? abs(prox_obj - previous_prox_obj) : Inf
 
         last_prox_obj = prox_obj
         last_prox_obj_change = prox_obj_change
-        last_step_norm = step_norm
-        last_step_norm_inf = step_norm_inf
-        last_original_grad_norm = original_grad_norm
-        last_original_grad_norm_inf = original_grad_norm_inf
-        last_inner_iters = sub.inner_iters
-        last_subproblem_residual_norm = sub.residual_norm
-        last_subproblem_residual_norm_inf = sub.residual_norm_inf
-        last_subproblem_acceptable_status = sub.acceptable_status
+        last_status = sub.status
+        last_primal_status = sub.primal_status
+        last_acceptable_status = sub.acceptable_status
 
         push!(
             status_history,
             (
-                prox_iter = prox_iter,
+                ppa_iter = ppa_iter,
                 status = sub.status,
                 primal_status = sub.primal_status,
                 acceptable_status = sub.acceptable_status,
                 prox_obj = prox_obj,
                 prox_obj_change = prox_obj_change,
-                step_norm = step_norm,
-                step_norm_inf = step_norm_inf,
-                inner_iters = last_inner_iters,
-                subproblem_residual_norm = last_subproblem_residual_norm,
-                subproblem_residual_norm_inf = last_subproblem_residual_norm_inf,
             ),
         )
 
         if diagnostics
             push!(
-                hist,
+                history,
                 (
-                    prox_iter = prox_iter,
+                    ppa_iter = ppa_iter,
                     obj = current_val.obj,
                     best_obj = best_val.obj,
                     prox_obj = prox_obj,
                     prox_obj_change = prox_obj_change,
                     psi = current_val.psi,
                     lambda_min = current_val.lambda_min,
-
-                    original_grad_norm = original_grad_norm,
-                    original_grad_norm_inf = original_grad_norm_inf,
-
-                    step_norm = step_norm,
-                    step_norm_inf = step_norm_inf,
-
                     gamma_min = minimum(current_val.gamma),
                     gamma_max = maximum(current_val.gamma),
-                    theta_norm = norm(theta),
-                    theta_norm_inf = norm(theta, Inf),
-
-                    status = sub.status,
-                    primal_status = sub.primal_status,
-                    acceptable_status = sub.acceptable_status,
-                    inner_iters = last_inner_iters,
-                    subproblem_residual_norm = last_subproblem_residual_norm,
-                    subproblem_residual_norm_inf = last_subproblem_residual_norm_inf,
                     cache_size = length(cache),
                     num_objective_solves = counters.num_objective_solves,
                     num_subgradient_evals = counters.num_subgradient_evals,
@@ -1329,39 +836,25 @@ function solve_proximal_knitro_upsilon_calibration(
                         counters.num_objective_oracle_requests,
                     num_objective_cache_hits =
                         counters.num_objective_cache_hits,
-                    objective_cache_hit_rate =
-                        counters.num_objective_oracle_requests == 0 ?
-                        0.0 :
-                        counters.num_objective_cache_hits /
-                        counters.num_objective_oracle_requests,
-
                     num_subgradient_requests =
                         counters.num_subgradient_requests,
                     num_subgradient_cache_hits =
                         counters.num_subgradient_cache_hits,
-                    subgradient_cache_hit_rate =
-                        counters.num_subgradient_requests == 0 ?
-                        0.0 :
-                        counters.num_subgradient_cache_hits /
-                        counters.num_subgradient_requests,
                 ),
             )
         end
 
         if verbose
             @printf(
-                "%s iter %3d | obj = %.12e | best = %.12e | prox_obj = %.12e | Δprox_obj = %.3e | psi = %.6e | step = %.3e | step_inf = %.3e | ||grad V|| = %.3e | subres_inf = %.3e | sub_ok = %s | status = %s | gamma [%.4e, %.4e]\n",
+                "%s iter %3d | obj = %.12e | best = %.12e | prox_obj = %.12e | Δprox_obj = %.3e | psi = %.6e | ||grad|| = %.3e | sub_ok = %s | status = %s | gamma [%.4e, %.4e]\n",
                 label,
-                prox_iter,
+                ppa_iter,
                 current_val.obj,
                 best_val.obj,
                 prox_obj,
                 prox_obj_change,
                 current_val.psi,
-                step_norm,
-                step_norm_inf,
-                original_grad_norm,
-                last_subproblem_residual_norm_inf,
+                current_grad_norm,
                 string(sub.acceptable_status),
                 string(sub.status),
                 minimum(current_val.gamma),
@@ -1370,48 +863,57 @@ function solve_proximal_knitro_upsilon_calibration(
             flush(stdout)
         end
 
-        if prox_iter >= 2 &&
-           prox_obj_change <= prox_obj_abs_tol &&
-           step_norm <= prox_step_tol
-            stop_reason = "prox_obj_and_step_tol"
+        if !sub.acceptable_status
+            stop_reason = "subproblem_not_acceptable"
+            break
+        end
+
+        if run_until_convergence
+            if current_grad_norm <= grad_tol
+                stop_reason = "grad_tol"
+                break
+            end
+
+            if ppa_iter >= 2 &&
+               prox_obj_change <= prox_obj_abs_tol &&
+               step_norm <= prox_step_tol
+                stop_reason = "prox_obj_and_step_tol"
+                break
+            end
         end
 
         previous_prox_obj = prox_obj
     end
 
+    if stop_reason == ""
+        stop_reason =
+            run_until_convergence ? "max_ppa_iters_safeguard" : "completed_k_iterations"
+    end
+
     final_val = best_val
     final_theta = best_theta
 
-    final_g = _prox_get_subgradient!(
-        Csym,
-        final_val,
-        s,
-        t;
-        atol = atol,
-        psi_margin = psi_margin,
-        psi_floor = psi_floor,
-        psi_derivative = psi_derivative,
-        counters = counters,
-    )
+    objective_cache_hit_rate =
+        counters.num_objective_oracle_requests == 0 ?
+        0.0 :
+        counters.num_objective_cache_hits / counters.num_objective_oracle_requests
 
-    final_original_grad_norm = norm(final_g)
-    final_original_grad_norm_inf = norm(final_g, Inf)
+    subgradient_cache_hit_rate =
+        counters.num_subgradient_requests == 0 ?
+        0.0 :
+        counters.num_subgradient_cache_hits / counters.num_subgradient_requests
 
     if verbose
         @printf(
-            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | psi = %.6e | ||grad V|| = %.3e | last_prox_obj = %.12e | last_Δprox_obj = %.3e | last_step = %.3e | gamma [%.4e, %.4e] | prox_iters = %d | stop = %s | cache = %d | obj_solves = %d | grad_evals = %d\n",
+            "%s final | obj = %.12e | unscaled = %.12e | improved = %s | psi = %.6e | gamma [%.4e, %.4e] | ppa_iters = %d | stop = %s | cache = %d | obj_solves = %d | grad_evals = %d\n",
             label,
             final_val.obj,
             unscaled_val.obj,
             string(final_val.obj < unscaled_val.obj),
             final_val.psi,
-            final_original_grad_norm,
-            last_prox_obj,
-            last_prox_obj_change,
-            last_step_norm,
             minimum(final_val.gamma),
             maximum(final_val.gamma),
-            prox_iter,
+            ppa_iter,
             stop_reason,
             length(cache),
             counters.num_objective_solves,
@@ -1427,65 +929,35 @@ function solve_proximal_knitro_upsilon_calibration(
         lambda_min = final_val.lambda_min,
         x = final_val.x,
         y = final_val.y,
-        z = final_val.obj,
         obj = final_val.obj,
-
-        best_ub = final_val.obj,
-        best_gamma = final_val.gamma,
-        best_psi = final_val.psi,
-        best_lambda_min_S = final_val.lambda_min,
-        best_min_gamma = minimum(final_val.gamma),
-        best_max_gamma = maximum(final_val.gamma),
-
-        best_eval = final_val,
-        final_eval = current_val,
-        history = hist,
-        status_history = status_history,
 
         unscaled_obj = unscaled_val.obj,
         unscaled_gamma = unscaled_val.gamma,
         unscaled_psi = unscaled_val.psi,
         improved = final_val.obj < unscaled_val.obj,
 
-        cache_size = length(cache),
-        num_objective_solves = counters.num_objective_solves,
-        num_subgradient_evals = counters.num_subgradient_evals,
-        num_objective_oracle_requests =
-            counters.num_objective_oracle_requests,
-        num_objective_cache_hits =
-            counters.num_objective_cache_hits,
-        objective_cache_hit_rate =
-            counters.num_objective_oracle_requests == 0 ?
-            0.0 :
-            counters.num_objective_cache_hits /
-            counters.num_objective_oracle_requests,
-
-        num_subgradient_requests =
-            counters.num_subgradient_requests,
-        num_subgradient_cache_hits =
-            counters.num_subgradient_cache_hits,
-        subgradient_cache_hit_rate =
-            counters.num_subgradient_requests == 0 ?
-            0.0 :
-            counters.num_subgradient_cache_hits /
-            counters.num_subgradient_requests,
-        prox_iters = prox_iter,
+        ppa_iters = ppa_iter,
+        k = k,
         rho = rho,
-        prox_subproblem_solver = :knitro,
         stop_reason = stop_reason,
 
-        final_original_grad_norm = final_original_grad_norm,
-        final_original_grad_norm_inf = final_original_grad_norm_inf,
-
+        knitro_status = last_status,
+        knitro_primal_status = last_primal_status,
+        last_subproblem_acceptable_status = last_acceptable_status,
         last_prox_obj = last_prox_obj,
         last_prox_obj_change = last_prox_obj_change,
 
-        last_step_norm = last_step_norm,
-        last_step_norm_inf = last_step_norm_inf,
+        cache_size = length(cache),
+        num_objective_solves = counters.num_objective_solves,
+        num_subgradient_evals = counters.num_subgradient_evals,
+        num_objective_oracle_requests = counters.num_objective_oracle_requests,
+        num_objective_cache_hits = counters.num_objective_cache_hits,
+        objective_cache_hit_rate = objective_cache_hit_rate,
+        num_subgradient_requests = counters.num_subgradient_requests,
+        num_subgradient_cache_hits = counters.num_subgradient_cache_hits,
+        subgradient_cache_hit_rate = subgradient_cache_hit_rate,
 
-        last_inner_iters = last_inner_iters,
-        last_subproblem_residual_norm = last_subproblem_residual_norm,
-        last_subproblem_residual_norm_inf = last_subproblem_residual_norm_inf,
-        last_subproblem_acceptable_status = last_subproblem_acceptable_status,
+        history = history,
+        status_history = status_history,
     )
 end

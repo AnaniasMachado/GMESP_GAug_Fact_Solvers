@@ -24,6 +24,10 @@ bfgs_param_sets = Dict(
 
         :use_steepest_descent_fallback => true,
 
+        :knitro_outlev => nothing,
+        :knitro_opttol => 1e-8,
+        :knitro_feastol => 1e-5,
+
         :verbose_bfgs => false,
     ),
 
@@ -48,6 +52,10 @@ bfgs_param_sets = Dict(
         :psi_derivative => true,
 
         :use_steepest_descent_fallback => true,
+
+        :knitro_outlev => nothing,
+        :knitro_opttol => 1e-8,
+        :knitro_feastol => 1e-5,
 
         :verbose_bfgs => false,
     ),
@@ -76,36 +84,7 @@ bfgs_param_sets = Dict(
 
         :knitro_outlev => nothing,
         :knitro_opttol => 1e-8,
-        :knitro_feastol => 1e-8,
-
-        :verbose_bfgs => false,
-    ),
-
-    :direct => Dict{Symbol,Any}(
-        :max_bfgs_iter => 150,
-
-        :grad_tol => 1e-2,
-        :step_tol => 1e-8,
-
-        :alpha0 => 1.0,
-        :alpha_min => 1e-10,
-        :alpha_decay => 0.75,
-        :armijo_c1 => 1e-6,
-        :max_backtracks => 50,
-
-        :curvature_tol => 1e-12,
-
-        :psi_margin => 1e-7,
-        :psi_floor => 0.0,
-
-        :max_theta_norm => 20.0,
-        :psi_derivative => true,
-
-        :use_steepest_descent_fallback => true,
-
-        :knitro_outlev => nothing,
-        :knitro_opttol => 1e-8,
-        :knitro_feastol => 1e-8,
+        :knitro_feastol => 1e-5,
 
         :verbose_bfgs => false,
     ),
@@ -113,11 +92,23 @@ bfgs_param_sets = Dict(
 
 
 # ============================================================
-# One-step proximal Knitro parameter sets
+# One-step PPA parameter sets
+#
+# These are for:
+#
+#     calibrate_upsilon_ppa_ddfactplus(...; k = 1, ...)
+#
 # ============================================================
-prox_step_param_sets = Dict(
+ppa_one_param_sets = Dict(
     :root => Dict{Symbol,Any}(
+        :k => 1,
+
         :rho => 1e3,
+
+        :grad_tol => 1e-2,
+        :prox_obj_abs_tol => 1e-8,
+        :prox_step_tol => 1e-8,
+        :max_wall_time => Inf,
 
         :theta_perturbation => 1e-2,
         :center_initial_theta => false,
@@ -150,12 +141,120 @@ prox_step_param_sets = Dict(
     ),
 
     :node => Dict{Symbol,Any}(
+        :k => 1,
+
         :rho => 1e3,
+
+        :grad_tol => 1e-2,
+        :prox_obj_abs_tol => 1e-8,
+        :prox_step_tol => 1e-8,
+        :max_wall_time => Inf,
 
         :theta_perturbation => 1e-2,
         :center_initial_theta => false,
 
-        :q_bound => 20.0,
+        # Fixed typo: was :q_bound.
+        :theta_bound => 20.0,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+        :t1_reformulation => false,
+
+        :relax_knitro_outlev => nothing,
+        :relax_knitro_opttol => 1e-8,
+        :relax_knitro_feastol => 1e-5,
+
+        :knitro_feastol => 1e-6,
+        :knitro_opttol => 1e-2,
+        :knitro_xtol => 1e-4,
+        :knitro_ftol => 1e-5,
+
+        :knitro_maxtime_real => Inf,
+        :knitro_algorithm => nothing,
+        :knitro_bar_murule => nothing,
+        :knitro_honorbnds => 1,
+        :knitro_outlev => 0,
+
+        :cache_digits => 6,
+        :diagnostics => false,
+        :verbose => false,
+    ),
+)
+
+
+# ============================================================
+# Full PPA parameter sets
+#
+# These are for:
+#
+#     calibrate_upsilon_ppa_ddfactplus(...; k = Inf, ...)
+#
+# Full PPA stops when either:
+#
+#     ||grad V(theta)|| <= grad_tol
+#
+# or:
+#
+#     prox_obj_change <= prox_obj_abs_tol
+#     and step_norm <= prox_step_tol
+#
+# ============================================================
+ppa_full_param_sets = Dict(
+    :root => Dict{Symbol,Any}(
+        :k => Inf,
+
+        :rho => 1e3,
+
+        :grad_tol => 1e-2,
+        :prox_obj_abs_tol => 1e-8,
+        :prox_step_tol => 1e-8,
+        :max_wall_time => Inf,
+
+        :theta_perturbation => 1e-2,
+        :center_initial_theta => false,
+
+        :theta_bound => 20.0,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+        :t1_reformulation => false,
+
+        :relax_knitro_outlev => nothing,
+        :relax_knitro_opttol => 1e-8,
+        :relax_knitro_feastol => 1e-5,
+
+        :knitro_feastol => 1e-6,
+        :knitro_opttol => 1e-2,
+        :knitro_xtol => 1e-4,
+        :knitro_ftol => 1e-5,
+
+        :knitro_maxtime_real => Inf,
+        :knitro_algorithm => nothing,
+        :knitro_bar_murule => nothing,
+        :knitro_honorbnds => 1,
+        :knitro_outlev => 0,
+
+        :cache_digits => 6,
+        :diagnostics => false,
+        :verbose => false,
+    ),
+
+    :node => Dict{Symbol,Any}(
+        :k => Inf,
+
+        :rho => 1e3,
+
+        :grad_tol => 1e-2,
+        :prox_obj_abs_tol => 1e-8,
+        :prox_step_tol => 1e-8,
+        :max_wall_time => Inf,
+
+        :theta_perturbation => 1e-2,
+        :center_initial_theta => false,
+
+        :theta_bound => 20.0,
 
         :psi_margin => 1e-7,
         :psi_floor => 0.0,

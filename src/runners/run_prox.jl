@@ -41,7 +41,7 @@ Csym = Symmetric(C)
 
 atol = 1e-10
 
-# Initial unscaled psi for DDGFact+
+# Initial unscaled psi for DDGFact+.
 psi = eigmin(Csym) - atol
 
 
@@ -59,62 +59,55 @@ relax_knitro_feastol = 1e-5
 # Full spectral DDGFact+_Upsilon BFGS calibration parameters
 # ============================================================
 
-max_bfgs_iter = 50
+bfgs_max_iter = 50
+bfgs_grad_tol = 1e-2
+bfgs_step_tol = 1e-8
 
-grad_tol = 1e-2
-step_tol = 1e-8
-
-alpha0 = 1.0
-alpha_min = 1e-10
-alpha_decay = 0.75
-armijo_c1 = 1e-6
-max_backtracks = 50
-
-curvature_tol = 1e-12
+bfgs_alpha0 = 1.0
+bfgs_alpha_min = 1e-10
+bfgs_alpha_decay = 0.75
+bfgs_armijo_c1 = 1e-6
+bfgs_max_backtracks = 50
+bfgs_curvature_tol = 1e-12
 
 psi_margin = 1e-7
 psi_floor = 0.0
 
-max_theta_norm = 20.0
-
+bfgs_max_theta_norm = 20.0
 verbose_bfgs = false
 
 
 # ============================================================
-# One-step proximal calibration parameters
+# PPA calibration parameters
 # ============================================================
 
-prox_rho = 1e3
+ppa_rho = 1e3
 
-prox_theta_perturbation = 1e-2
-prox_center_initial_theta = false
+ppa_theta_perturbation = 1e-2
+ppa_center_initial_theta = false
+ppa_theta_bound = 20.0
 
-prox_theta_bound = 20.0
+# Full PPA stopping criteria, used only when k = Inf.
+ppa_grad_tol = 1e-2
+ppa_prox_obj_abs_tol = 1e-8
+ppa_prox_step_tol = 1e-8
+ppa_max_wall_time = Inf
 
 # Knitro proximal subproblem options.
-prox_knitro_feastol = 1e-6
-prox_knitro_opttol = 1e-2
-prox_knitro_xtol = 1e-4
-prox_knitro_ftol = 1e-5
+ppa_knitro_feastol = 1e-6
+ppa_knitro_opttol = 1e-2
+ppa_knitro_xtol = 1e-4
+ppa_knitro_ftol = 1e-5
 
-prox_knitro_maxtime_real = Inf
-prox_knitro_algorithm = nothing
-prox_knitro_bar_murule = nothing
-prox_knitro_honorbnds = 1
-prox_knitro_outlev = 0
+ppa_knitro_maxtime_real = Inf
+ppa_knitro_algorithm = nothing
+ppa_knitro_bar_murule = nothing
+ppa_knitro_honorbnds = 1
+ppa_knitro_outlev = 0
 
-prox_cache_digits = 6
-prox_diagnostics = false
-verbose_prox = false
-
-
-# ============================================================
-# Multi-step proximal calibration parameters
-# ============================================================
-
-multi_prox_obj_abs_tol = 1e-8
-multi_prox_step_tol = 1e-8
-multi_prox_max_wall_time = Inf
+ppa_cache_digits = 6
+ppa_diagnostics = false
+verbose_ppa = false
 
 
 # ============================================================
@@ -122,7 +115,7 @@ multi_prox_max_wall_time = Inf
 # ============================================================
 
 solver = "knitro"
-calib_method = "bfgs_prox_knitro"
+calib_method = "bfgs_ppa"
 
 mkpath("results")
 
@@ -130,6 +123,63 @@ results_filepath =
     "results/results_$(solver)_$(calib_method)_n$(n)_kappa$(kappa).csv"
 
 results = Any[]
+
+
+# ============================================================
+# Small helpers for compact CSV rows
+# ============================================================
+
+_status_string(x) = x === missing ? "missing" : string(x)
+
+function _gamma_theta_stats(prefix::Symbol, gamma::AbstractVector, theta::AbstractVector)
+    p = String(prefix)
+
+    names = (
+        Symbol("$(p)_gamma_norm"),
+        Symbol("$(p)_gamma_norm_inf"),
+        Symbol("$(p)_theta_norm"),
+        Symbol("$(p)_theta_norm_inf"),
+    )
+
+    values = (
+        norm(gamma),
+        norm(gamma, Inf),
+        norm(theta),
+        norm(theta, Inf),
+    )
+
+    return NamedTuple{names}(values)
+end
+
+function _ppa_cache_stats(prefix::Symbol, result)
+    p = String(prefix)
+
+    names = (
+        Symbol("$(p)_cache_size"),
+        Symbol("$(p)_num_objective_oracle_requests"),
+        Symbol("$(p)_num_objective_cache_hits"),
+        Symbol("$(p)_objective_cache_hit_rate"),
+        Symbol("$(p)_num_objective_solves"),
+        Symbol("$(p)_num_subgradient_requests"),
+        Symbol("$(p)_num_subgradient_cache_hits"),
+        Symbol("$(p)_subgradient_cache_hit_rate"),
+        Symbol("$(p)_num_subgradient_evals"),
+    )
+
+    values = (
+        result.cache_size,
+        result.num_objective_oracle_requests,
+        result.num_objective_cache_hits,
+        result.objective_cache_hit_rate,
+        result.num_objective_solves,
+        result.num_subgradient_requests,
+        result.num_subgradient_cache_hits,
+        result.subgradient_cache_hit_rate,
+        result.num_subgradient_evals,
+    )
+
+    return NamedTuple{names}(values)
+end
 
 
 for s in s_vals
@@ -171,53 +221,6 @@ for s in s_vals
 
 
     # ============================================================
-    # DDGFact+_Upsilon, full spectral BFGS calibration
-    # ============================================================
-
-    runtime_ddgfact_plus_upsilon_bfgs = @elapsed begin
-        calib_result_bfgs = calibrate_upsilon_bfgs_ddfactplus(
-            Csym,
-            s,
-            t;
-            atol = atol,
-            max_iter = max_bfgs_iter,
-            grad_tol = grad_tol,
-            step_tol = step_tol,
-            psi_margin = psi_margin,
-            psi_floor = psi_floor,
-            alpha0 = alpha0,
-            alpha_min = alpha_min,
-            alpha_decay = alpha_decay,
-            armijo_c1 = armijo_c1,
-            curvature_tol = curvature_tol,
-            max_backtracks = max_backtracks,
-            max_theta_norm = max_theta_norm,
-            psi_derivative = true,
-            t1_reformulation = false,
-
-            knitro_outlev = relax_knitro_outlev,
-            knitro_opttol = relax_knitro_opttol,
-            knitro_feastol = relax_knitro_feastol,
-
-            verbose = verbose_bfgs,
-        )
-
-        gamma_upsilon_bfgs = calib_result_bfgs.gamma
-        theta_upsilon_bfgs = calib_result_bfgs.theta
-        psi_upsilon_bfgs = calib_result_bfgs.psi
-
-        x_ddgfact_plus_upsilon_bfgs = calib_result_bfgs.x
-        y_ddgfact_plus_upsilon_bfgs = calib_result_bfgs.y
-        z_ddgfact_plus_upsilon_bfgs = calib_result_bfgs.obj
-    end
-
-    Cgamma_upsilon_bfgs = scaled_matrix(Csym, gamma_upsilon_bfgs)
-    lambda_min_upsilon_bfgs = eigmin(Cgamma_upsilon_bfgs)
-    feasibility_slack_upsilon_bfgs =
-        lambda_min_upsilon_bfgs - psi_upsilon_bfgs
-
-
-    # ============================================================
     # Local search
     # Needed to compute gaps.
     # ============================================================
@@ -237,319 +240,264 @@ for s in s_vals
 
 
     # ============================================================
-    # Initial theta for one-step proximal calibration
+    # DDGFact+_Upsilon, full spectral BFGS calibration
+    # ============================================================
+
+    runtime_upsilon_bfgs = @elapsed begin
+        result_bfgs = calibrate_upsilon_bfgs_ddfactplus(
+            Csym,
+            s,
+            t;
+            atol = atol,
+            max_iter = bfgs_max_iter,
+            grad_tol = bfgs_grad_tol,
+            step_tol = bfgs_step_tol,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            alpha0 = bfgs_alpha0,
+            alpha_min = bfgs_alpha_min,
+            alpha_decay = bfgs_alpha_decay,
+            armijo_c1 = bfgs_armijo_c1,
+            curvature_tol = bfgs_curvature_tol,
+            max_backtracks = bfgs_max_backtracks,
+            max_theta_norm = bfgs_max_theta_norm,
+            psi_derivative = true,
+            t1_reformulation = false,
+
+            knitro_outlev = relax_knitro_outlev,
+            knitro_opttol = relax_knitro_opttol,
+            knitro_feastol = relax_knitro_feastol,
+
+            verbose = verbose_bfgs,
+        )
+    end
+
+
+    # ============================================================
+    # Shared initial theta for one-step PPA and full PPA
     # ============================================================
 
     Random.seed!(1)
 
-    theta0_prox =
-        prox_theta_perturbation == 0.0 ?
+    theta0_ppa =
+        ppa_theta_perturbation == 0.0 ?
         zeros(Float64, n) :
-        prox_theta_perturbation .* randn(n)
+        ppa_theta_perturbation .* randn(n)
 
-    if prox_center_initial_theta
-        theta0_prox .-= mean(theta0_prox)
+    if ppa_center_initial_theta
+        theta0_ppa .-= mean(theta0_ppa)
     end
 
-    if isfinite(prox_theta_bound)
-        theta0_prox .= clamp.(theta0_prox, -prox_theta_bound, prox_theta_bound)
+    if isfinite(ppa_theta_bound)
+        theta0_ppa .= clamp.(theta0_ppa, -ppa_theta_bound, ppa_theta_bound)
     end
 
 
     # ============================================================
-    # DDGFact+_Upsilon one-step proximal calibration with Knitro
-    # ============================================================
-
-    println()
-    println("Running one-step proximal calibration with Knitro")
-    flush(stdout)
-
-    one_step_runtime = @elapsed begin
-        calib_result_one_step =
-            solve_one_step_proximal_knitro_upsilon_calibration(
-                Csym,
-                s,
-                t;
-                J1 = Int[],
-                J0 = Int[],
-                theta0 = theta0_prox,
-
-                rho = prox_rho,
-
-                theta_perturbation = 0.0,
-                center_initial_theta = false,
-                theta_bound = prox_theta_bound,
-
-                psi_margin = psi_margin,
-                psi_floor = psi_floor,
-                psi_derivative = true,
-                t1_reformulation = false,
-                atol = atol,
-
-                # DDGFact+_Upsilon relaxation solve tolerances.
-                relax_knitro_outlev = relax_knitro_outlev,
-                relax_knitro_opttol = relax_knitro_opttol,
-                relax_knitro_feastol = relax_knitro_feastol,
-
-                # Proximal subproblem tolerances.
-                knitro_feastol = prox_knitro_feastol,
-                knitro_opttol = prox_knitro_opttol,
-                knitro_xtol = prox_knitro_xtol,
-                knitro_ftol = prox_knitro_ftol,
-                knitro_maxtime_real = prox_knitro_maxtime_real,
-                knitro_algorithm = prox_knitro_algorithm,
-                knitro_bar_murule = prox_knitro_bar_murule,
-                knitro_honorbnds = prox_knitro_honorbnds,
-                knitro_outlev = prox_knitro_outlev,
-
-                cache_digits = prox_cache_digits,
-                diagnostics = prox_diagnostics,
-                verbose = verbose_prox,
-            )
-
-        gamma_upsilon_one_step = calib_result_one_step.gamma
-        theta_upsilon_one_step = calib_result_one_step.theta
-        psi_upsilon_one_step = calib_result_one_step.psi
-
-        x_ddgfact_plus_upsilon_one_step = calib_result_one_step.x
-        y_ddgfact_plus_upsilon_one_step = calib_result_one_step.y
-        z_ddgfact_plus_upsilon_one_step = calib_result_one_step.obj
-    end
-
-    Cgamma_upsilon_one_step = scaled_matrix(Csym, gamma_upsilon_one_step)
-    lambda_min_upsilon_one_step = eigmin(Cgamma_upsilon_one_step)
-    feasibility_slack_upsilon_one_step =
-        lambda_min_upsilon_one_step - psi_upsilon_one_step
-
-
-    # ============================================================
-    # DDGFact+_Upsilon multi-step proximal calibration with Knitro
+    # DDGFact+_Upsilon, one PPA iteration
     # ============================================================
 
     println()
-    println("Running multi-step proximal calibration with Knitro")
+    println("Running one PPA iteration")
     flush(stdout)
 
-    multi_step_runtime = @elapsed begin
-        calib_result_multi_step =
-            solve_proximal_knitro_upsilon_calibration(
-                Csym,
-                s,
-                t;
-                J1 = Int[],
-                J0 = Int[],
-                theta0 = theta0_prox,
+    runtime_upsilon_ppa_one = @elapsed begin
+        result_ppa_one = calibrate_upsilon_ppa_ddfactplus(
+            Csym,
+            s,
+            t;
+            J1 = Int[],
+            J0 = Int[],
+            theta0 = theta0_ppa,
+            k = 1,
 
-                rho = prox_rho,
+            rho = ppa_rho,
+            grad_tol = ppa_grad_tol,
+            prox_obj_abs_tol = ppa_prox_obj_abs_tol,
+            prox_step_tol = ppa_prox_step_tol,
+            max_wall_time = ppa_max_wall_time,
 
-                prox_obj_abs_tol = multi_prox_obj_abs_tol,
-                prox_step_tol = multi_prox_step_tol,
-                max_wall_time = multi_prox_max_wall_time,
+            theta_perturbation = 0.0,
+            center_initial_theta = false,
+            theta_bound = ppa_theta_bound,
 
-                theta_perturbation = 0.0,
-                center_initial_theta = false,
-                theta_bound = prox_theta_bound,
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = true,
+            t1_reformulation = false,
+            atol = atol,
 
-                psi_margin = psi_margin,
-                psi_floor = psi_floor,
-                psi_derivative = true,
-                t1_reformulation = false,
-                atol = atol,
+            relax_knitro_outlev = relax_knitro_outlev,
+            relax_knitro_opttol = relax_knitro_opttol,
+            relax_knitro_feastol = relax_knitro_feastol,
 
-                # DDGFact+_Upsilon relaxation solve tolerances.
-                relax_knitro_outlev = relax_knitro_outlev,
-                relax_knitro_opttol = relax_knitro_opttol,
-                relax_knitro_feastol = relax_knitro_feastol,
+            knitro_feastol = ppa_knitro_feastol,
+            knitro_opttol = ppa_knitro_opttol,
+            knitro_xtol = ppa_knitro_xtol,
+            knitro_ftol = ppa_knitro_ftol,
+            knitro_maxtime_real = ppa_knitro_maxtime_real,
+            knitro_algorithm = ppa_knitro_algorithm,
+            knitro_bar_murule = ppa_knitro_bar_murule,
+            knitro_honorbnds = ppa_knitro_honorbnds,
+            knitro_outlev = ppa_knitro_outlev,
 
-                # Proximal subproblem tolerances.
-                knitro_feastol = prox_knitro_feastol,
-                knitro_opttol = prox_knitro_opttol,
-                knitro_xtol = prox_knitro_xtol,
-                knitro_ftol = prox_knitro_ftol,
-                knitro_maxtime_real = prox_knitro_maxtime_real,
-                knitro_algorithm = prox_knitro_algorithm,
-                knitro_bar_murule = prox_knitro_bar_murule,
-                knitro_honorbnds = prox_knitro_honorbnds,
-                knitro_outlev = prox_knitro_outlev,
-
-                cache_digits = prox_cache_digits,
-                diagnostics = prox_diagnostics,
-                verbose = verbose_prox,
-            )
-
-        gamma_upsilon_multi_step = calib_result_multi_step.gamma
-        theta_upsilon_multi_step = calib_result_multi_step.theta
-        psi_upsilon_multi_step = calib_result_multi_step.psi
-
-        x_ddgfact_plus_upsilon_multi_step = calib_result_multi_step.x
-        y_ddgfact_plus_upsilon_multi_step = calib_result_multi_step.y
-        z_ddgfact_plus_upsilon_multi_step = calib_result_multi_step.obj
+            cache_digits = ppa_cache_digits,
+            diagnostics = ppa_diagnostics,
+            verbose = verbose_ppa,
+        )
     end
 
-    Cgamma_upsilon_multi_step = scaled_matrix(Csym, gamma_upsilon_multi_step)
-    lambda_min_upsilon_multi_step = eigmin(Cgamma_upsilon_multi_step)
-    feasibility_slack_upsilon_multi_step =
-        lambda_min_upsilon_multi_step - psi_upsilon_multi_step
+
+    # ============================================================
+    # DDGFact+_Upsilon, full PPA until convergence
+    # ============================================================
+
+    println()
+    println("Running full PPA")
+    flush(stdout)
+
+    runtime_upsilon_ppa_full = @elapsed begin
+        result_ppa_full = calibrate_upsilon_ppa_ddfactplus(
+            Csym,
+            s,
+            t;
+            J1 = Int[],
+            J0 = Int[],
+            theta0 = theta0_ppa,
+            k = Inf,
+
+            rho = ppa_rho,
+            grad_tol = ppa_grad_tol,
+            prox_obj_abs_tol = ppa_prox_obj_abs_tol,
+            prox_step_tol = ppa_prox_step_tol,
+            max_wall_time = ppa_max_wall_time,
+
+            theta_perturbation = 0.0,
+            center_initial_theta = false,
+            theta_bound = ppa_theta_bound,
+
+            psi_margin = psi_margin,
+            psi_floor = psi_floor,
+            psi_derivative = true,
+            t1_reformulation = false,
+            atol = atol,
+
+            relax_knitro_outlev = relax_knitro_outlev,
+            relax_knitro_opttol = relax_knitro_opttol,
+            relax_knitro_feastol = relax_knitro_feastol,
+
+            knitro_feastol = ppa_knitro_feastol,
+            knitro_opttol = ppa_knitro_opttol,
+            knitro_xtol = ppa_knitro_xtol,
+            knitro_ftol = ppa_knitro_ftol,
+            knitro_maxtime_real = ppa_knitro_maxtime_real,
+            knitro_algorithm = ppa_knitro_algorithm,
+            knitro_bar_murule = ppa_knitro_bar_murule,
+            knitro_honorbnds = ppa_knitro_honorbnds,
+            knitro_outlev = ppa_knitro_outlev,
+
+            cache_digits = ppa_cache_digits,
+            diagnostics = ppa_diagnostics,
+            verbose = verbose_ppa,
+        )
+    end
 
 
     # ============================================================
     # Store row
     # ============================================================
 
+    bfgs_stats = _gamma_theta_stats(
+        :upsilon_bfgs,
+        result_bfgs.gamma,
+        result_bfgs.theta,
+    )
+
+    ppa_one_stats = _gamma_theta_stats(
+        :upsilon_ppa_one,
+        result_ppa_one.gamma,
+        result_ppa_one.theta,
+    )
+
+    ppa_full_stats = _gamma_theta_stats(
+        :upsilon_ppa_full,
+        result_ppa_full.gamma,
+        result_ppa_full.theta,
+    )
+
+    ppa_one_cache_stats = _ppa_cache_stats(:ppa_one, result_ppa_one)
+    ppa_full_cache_stats = _ppa_cache_stats(:ppa_full, result_ppa_full)
+
     push!(
         results,
-        (
-            n = n,
-            s = s,
-            t = t,
+        merge(
+            (
+                n = n,
+                s = s,
+                t = t,
 
-            # Gaps
-            ddgfact_gap = z_ddgfact - z_ls,
-            ddgfact_plus_gap = z_ddgfact_plus - z_ls,
-            ddgfact_plus_upsilon_bfgs_gap =
-                z_ddgfact_plus_upsilon_bfgs - z_ls,
-            ddgfact_plus_upsilon_one_step_gap =
-                z_ddgfact_plus_upsilon_one_step - z_ls,
-            ddgfact_plus_upsilon_multi_step_gap =
-                z_ddgfact_plus_upsilon_multi_step - z_ls,
-            spec_gap = z_spec - z_ls,
+                # Gaps relative to local search.
+                ddgfact_gap = z_ddgfact - z_ls,
+                ddgfact_plus_gap = z_ddgfact_plus - z_ls,
+                upsilon_bfgs_gap = result_bfgs.obj - z_ls,
+                upsilon_ppa_one_gap = result_ppa_one.obj - z_ls,
+                upsilon_ppa_full_gap = result_ppa_full.obj - z_ls,
+                spectral_gap = z_spec - z_ls,
 
-            # Runtimes
-            ddgfact_runtime = runtime_ddgfact,
-            ddgfact_plus_runtime = runtime_ddgfact_plus,
-            ddgfact_plus_upsilon_bfgs_runtime =
-                runtime_ddgfact_plus_upsilon_bfgs,
-            ddgfact_plus_upsilon_one_step_runtime =
-                one_step_runtime,
-            ddgfact_plus_upsilon_multi_step_runtime =
-                multi_step_runtime,
-            local_search_runtime = runtime_ls,
-            spectral_runtime = runtime_spec,
+                # Runtimes.
+                ddgfact_runtime = runtime_ddgfact,
+                ddgfact_plus_runtime = runtime_ddgfact_plus,
+                upsilon_bfgs_runtime = runtime_upsilon_bfgs,
+                upsilon_ppa_one_runtime = runtime_upsilon_ppa_one,
+                upsilon_ppa_full_runtime = runtime_upsilon_ppa_full,
+                local_search_runtime = runtime_ls,
+                spectral_runtime = runtime_spec,
 
-            # Objective values
-            z_ls = z_ls,
-            z_ddgfact = z_ddgfact,
-            z_ddgfact_plus = z_ddgfact_plus,
-            z_ddgfact_plus_upsilon_bfgs = z_ddgfact_plus_upsilon_bfgs,
-            z_ddgfact_plus_upsilon_one_step =
-                z_ddgfact_plus_upsilon_one_step,
-            z_ddgfact_plus_upsilon_multi_step =
-                z_ddgfact_plus_upsilon_multi_step,
-            z_spec = z_spec,
+                # Calibration metadata.
+                upsilon_bfgs_improved = result_bfgs.improved,
+                upsilon_bfgs_fallback_used = result_bfgs.fallback_used,
+                upsilon_bfgs_fallback_count = result_bfgs.fallback_count,
+                upsilon_bfgs_final_oracle = result_bfgs.final_oracle,
 
-            # Psi and feasibility diagnostics
-            psi_ddgfact_plus = psi,
+                ppa_one_improved = result_ppa_one.improved,
+                ppa_one_iters = result_ppa_one.ppa_iters,
+                ppa_one_stop_reason = result_ppa_one.stop_reason,
+                ppa_one_knitro_status =
+                    _status_string(result_ppa_one.knitro_status),
+                ppa_one_knitro_primal_status =
+                    _status_string(result_ppa_one.knitro_primal_status),
+                ppa_one_subproblem_acceptable =
+                    result_ppa_one.last_subproblem_acceptable_status,
 
-            psi_upsilon_bfgs = psi_upsilon_bfgs,
-            lambda_min_upsilon_bfgs = lambda_min_upsilon_bfgs,
-            feasibility_slack_upsilon_bfgs =
-                feasibility_slack_upsilon_bfgs,
+                ppa_full_improved = result_ppa_full.improved,
+                ppa_full_iters = result_ppa_full.ppa_iters,
+                ppa_full_stop_reason = result_ppa_full.stop_reason,
+                ppa_full_knitro_status =
+                    _status_string(result_ppa_full.knitro_status),
+                ppa_full_knitro_primal_status =
+                    _status_string(result_ppa_full.knitro_primal_status),
+                ppa_full_subproblem_acceptable =
+                    result_ppa_full.last_subproblem_acceptable_status,
 
-            psi_upsilon_one_step = psi_upsilon_one_step,
-            lambda_min_upsilon_one_step =
-                lambda_min_upsilon_one_step,
-            feasibility_slack_upsilon_one_step =
-                feasibility_slack_upsilon_one_step,
-            
-            psi_upsilon_multi_step = psi_upsilon_multi_step,
-            lambda_min_upsilon_multi_step =
-                lambda_min_upsilon_multi_step,
-            feasibility_slack_upsilon_multi_step =
-                feasibility_slack_upsilon_multi_step,
-
-            # Gamma diagnostics: full spectral BFGS
-            gamma_min_upsilon_bfgs = minimum(gamma_upsilon_bfgs),
-            gamma_max_upsilon_bfgs = maximum(gamma_upsilon_bfgs),
-            theta_norm_upsilon_bfgs = norm(theta_upsilon_bfgs),
-            theta_norm_inf_upsilon_bfgs = norm(theta_upsilon_bfgs, Inf),
-
-            # Gamma diagnostics: one-step proximal method
-            gamma_min_upsilon_one_step =
-                minimum(gamma_upsilon_one_step),
-            gamma_max_upsilon_one_step =
-                maximum(gamma_upsilon_one_step),
-            theta_norm_upsilon_one_step =
-                norm(theta_upsilon_one_step),
-            theta_norm_inf_upsilon_one_step =
-                norm(theta_upsilon_one_step, Inf),
-            
-            # Gamma diagnostics: PPA method
-            gamma_min_upsilon_multi_step =
-                minimum(gamma_upsilon_multi_step),
-            gamma_max_upsilon_multi_step =
-                maximum(gamma_upsilon_multi_step),
-            theta_norm_upsilon_multi_step =
-                norm(theta_upsilon_multi_step),
-            theta_norm_inf_upsilon_multi_step =
-                norm(theta_upsilon_multi_step, Inf),
-
-            # One-step cache and solver diagnostics
-            one_step_cache_size = calib_result_one_step.cache_size,
-
-            one_step_num_objective_oracle_requests =
-                calib_result_one_step.num_objective_oracle_requests,
-            one_step_num_objective_cache_hits =
-                calib_result_one_step.num_objective_cache_hits,
-            one_step_objective_cache_hit_rate =
-                calib_result_one_step.objective_cache_hit_rate,
-            one_step_num_objective_solves =
-                calib_result_one_step.num_objective_solves,
-
-            one_step_num_subgradient_requests =
-                calib_result_one_step.num_subgradient_requests,
-            one_step_num_subgradient_cache_hits =
-                calib_result_one_step.num_subgradient_cache_hits,
-            one_step_subgradient_cache_hit_rate =
-                calib_result_one_step.subgradient_cache_hit_rate,
-            one_step_num_subgradient_evals =
-                calib_result_one_step.num_subgradient_evals,
-
-            one_step_subproblem_status =
-                calib_result_one_step.knitro_status,
-            one_step_subproblem_primal_status =
-                calib_result_one_step.knitro_primal_status,
-            one_step_subproblem_acceptable_status =
-                calib_result_one_step.last_subproblem_acceptable_status,
-            one_step_subproblem_residual_norm_inf =
-                calib_result_one_step.last_subproblem_residual_norm_inf,
-            
-            # Multi-step cache and solver diagnostics
-            multi_step_cache_size =
-                calib_result_multi_step.cache_size,
-
-            multi_step_num_objective_oracle_requests =
-                calib_result_multi_step.num_objective_oracle_requests,
-            multi_step_num_objective_cache_hits =
-                calib_result_multi_step.num_objective_cache_hits,
-            multi_step_objective_cache_hit_rate =
-                calib_result_multi_step.objective_cache_hit_rate,
-            multi_step_num_objective_solves =
-                calib_result_multi_step.num_objective_solves,
-
-            multi_step_num_subgradient_requests =
-                calib_result_multi_step.num_subgradient_requests,
-            multi_step_num_subgradient_cache_hits =
-                calib_result_multi_step.num_subgradient_cache_hits,
-            multi_step_subgradient_cache_hit_rate =
-                calib_result_multi_step.subgradient_cache_hit_rate,
-            multi_step_num_subgradient_evals =
-                calib_result_multi_step.num_subgradient_evals,
-
-            multi_step_prox_iters =
-                calib_result_multi_step.prox_iters,
-            multi_step_stop_reason =
-                calib_result_multi_step.stop_reason,
-            multi_step_subproblem_acceptable_status =
-                calib_result_multi_step.last_subproblem_acceptable_status,
-            multi_step_subproblem_residual_norm_inf =
-                calib_result_multi_step.last_subproblem_residual_norm_inf,
-            
-            relax_knitro_opttol = relax_knitro_opttol,
-            relax_knitro_feastol = relax_knitro_feastol,
-            prox_knitro_opttol = prox_knitro_opttol,
-            prox_knitro_feastol = prox_knitro_feastol,
-            prox_knitro_xtol = prox_knitro_xtol,
-            prox_knitro_ftol = prox_knitro_ftol,
+                # Parameters worth keeping with the result row.
+                relax_knitro_opttol = relax_knitro_opttol,
+                relax_knitro_feastol = relax_knitro_feastol,
+                bfgs_grad_tol = bfgs_grad_tol,
+                bfgs_step_tol = bfgs_step_tol,
+                ppa_rho = ppa_rho,
+                ppa_grad_tol = ppa_grad_tol,
+                ppa_prox_obj_abs_tol = ppa_prox_obj_abs_tol,
+                ppa_prox_step_tol = ppa_prox_step_tol,
+                ppa_knitro_opttol = ppa_knitro_opttol,
+                ppa_knitro_feastol = ppa_knitro_feastol,
+                ppa_knitro_xtol = ppa_knitro_xtol,
+                ppa_knitro_ftol = ppa_knitro_ftol,
+            ),
+            bfgs_stats,
+            ppa_one_stats,
+            ppa_full_stats,
+            ppa_one_cache_stats,
+            ppa_full_cache_stats,
         ),
     )
 
@@ -560,69 +508,47 @@ for s in s_vals
 
     println()
     println("========== INSTANCE SUMMARY ==========")
-    println("s:                                                     ", s)
-    println("t:                                                     ", t)
+    println("s:                                      ", s)
+    println("t:                                      ", t)
 
     println()
-    println("gap_ddgfact:                                          ", z_ddgfact - z_ls)
-    println("gap_ddgfact_plus:                                     ", z_ddgfact_plus - z_ls)
-    println("gap_ddgfact_plus_upsilon_bfgs:                        ", z_ddgfact_plus_upsilon_bfgs - z_ls)
-    println("gap_ddgfact_plus_upsilon_one_step:                    ", z_ddgfact_plus_upsilon_one_step - z_ls)
-    println("gap_ddgfact_plus_upsilon_multi_step:                  ", z_ddgfact_plus_upsilon_multi_step - z_ls)
-    println("gap_spec:                                             ", z_spec - z_ls)
+    println("ddgfact_gap:                           ", z_ddgfact - z_ls)
+    println("ddgfact_plus_gap:                      ", z_ddgfact_plus - z_ls)
+    println("upsilon_bfgs_gap:                      ", result_bfgs.obj - z_ls)
+    println("upsilon_ppa_one_gap:                   ", result_ppa_one.obj - z_ls)
+    println("upsilon_ppa_full_gap:                  ", result_ppa_full.obj - z_ls)
+    println("spectral_gap:                          ", z_spec - z_ls)
 
     println()
-    println("runtime_ddgfact:                                      ", runtime_ddgfact)
-    println("runtime_ddgfact_plus:                                 ", runtime_ddgfact_plus)
-    println("runtime_ddgfact_plus_upsilon_bfgs:                    ", runtime_ddgfact_plus_upsilon_bfgs)
-    println("runtime_ddgfact_plus_upsilon_one_step:                ", one_step_runtime)
-    println("runtime_ddgfact_plus_upsilon_multi_step:              ", multi_step_runtime)
-    println("runtime_ls:                                           ", runtime_ls)
-    println("runtime_spec:                                         ", runtime_spec)
+    println("ddgfact_runtime:                       ", runtime_ddgfact)
+    println("ddgfact_plus_runtime:                  ", runtime_ddgfact_plus)
+    println("upsilon_bfgs_runtime:                  ", runtime_upsilon_bfgs)
+    println("upsilon_ppa_one_runtime:               ", runtime_upsilon_ppa_one)
+    println("upsilon_ppa_full_runtime:              ", runtime_upsilon_ppa_full)
+    println("local_search_runtime:                  ", runtime_ls)
+    println("spectral_runtime:                      ", runtime_spec)
 
     println()
-    println("gamma_min_upsilon_bfgs:                               ", minimum(gamma_upsilon_bfgs))
-    println("gamma_max_upsilon_bfgs:                               ", maximum(gamma_upsilon_bfgs))
-    println("gamma_min_upsilon_one_step:                           ", minimum(gamma_upsilon_one_step))
-    println("gamma_max_upsilon_one_step:                           ", maximum(gamma_upsilon_one_step))
-    println("gamma_min_upsilon_multi_step:                         ", minimum(gamma_upsilon_multi_step))
-    println("gamma_max_upsilon_multi_step:                         ", maximum(gamma_upsilon_multi_step))
+    println("norm_gamma_upsilon_bfgs:               ", norm(result_bfgs.gamma))
+    println("norm_theta_upsilon_bfgs:               ", norm(result_bfgs.theta))
+    println("norm_gamma_upsilon_ppa_one:            ", norm(result_ppa_one.gamma))
+    println("norm_theta_upsilon_ppa_one:            ", norm(result_ppa_one.theta))
+    println("norm_gamma_upsilon_ppa_full:           ", norm(result_ppa_full.gamma))
+    println("norm_theta_upsilon_ppa_full:           ", norm(result_ppa_full.theta))
 
     println()
-    println("one_step_cache_size:                                  ", calib_result_one_step.cache_size)
+    println("ppa_one_cache_size:                    ", result_ppa_one.cache_size)
+    println("ppa_one_objective_cache_hit_rate:      ", result_ppa_one.objective_cache_hit_rate)
+    println("ppa_one_subgradient_cache_hit_rate:    ", result_ppa_one.subgradient_cache_hit_rate)
+    println("ppa_one_stop_reason:                   ", result_ppa_one.stop_reason)
+    println("ppa_one_iters:                         ", result_ppa_one.ppa_iters)
 
-    println("one_step_num_objective_oracle_requests:               ", calib_result_one_step.num_objective_oracle_requests)
-    println("one_step_num_objective_cache_hits:                    ", calib_result_one_step.num_objective_cache_hits)
-    println("one_step_objective_cache_hit_rate:                    ", calib_result_one_step.objective_cache_hit_rate)
-    println("one_step_num_objective_solves:                        ", calib_result_one_step.num_objective_solves)
-
-    println("one_step_num_subgradient_requests:                    ", calib_result_one_step.num_subgradient_requests)
-    println("one_step_num_subgradient_cache_hits:                  ", calib_result_one_step.num_subgradient_cache_hits)
-    println("one_step_subgradient_cache_hit_rate:                  ", calib_result_one_step.subgradient_cache_hit_rate)
-    println("one_step_num_subgradient_evals:                       ", calib_result_one_step.num_subgradient_evals)
-
-    println("one_step_subproblem_status:                           ", calib_result_one_step.knitro_status)
-    println("one_step_subproblem_primal_status:                    ", calib_result_one_step.knitro_primal_status)
-    println("one_step_subproblem_acceptable_status:                ", calib_result_one_step.last_subproblem_acceptable_status)
-    println("one_step_subproblem_residual_norm_inf:                ", calib_result_one_step.last_subproblem_residual_norm_inf)
-    
     println()
-    println("multi_step_cache_size:                                ", calib_result_multi_step.cache_size)
-
-    println("multi_step_num_objective_oracle_requests:             ", calib_result_multi_step.num_objective_oracle_requests)
-    println("multi_step_num_objective_cache_hits:                  ", calib_result_multi_step.num_objective_cache_hits)
-    println("multi_step_objective_cache_hit_rate:                  ", calib_result_multi_step.objective_cache_hit_rate)
-    println("multi_step_num_objective_solves:                      ", calib_result_multi_step.num_objective_solves)
-
-    println("multi_step_num_subgradient_requests:                  ", calib_result_multi_step.num_subgradient_requests)
-    println("multi_step_num_subgradient_cache_hits:                ", calib_result_multi_step.num_subgradient_cache_hits)
-    println("multi_step_subgradient_cache_hit_rate:                ", calib_result_multi_step.subgradient_cache_hit_rate)
-    println("multi_step_num_subgradient_evals:                     ", calib_result_multi_step.num_subgradient_evals)
-
-    println("multi_step_prox_iters:                                ", calib_result_multi_step.prox_iters)
-    println("multi_step_stop_reason:                               ", calib_result_multi_step.stop_reason)
-    println("multi_step_subproblem_acceptable_status:              ", calib_result_multi_step.last_subproblem_acceptable_status)
-    println("multi_step_subproblem_residual_norm_inf:              ", calib_result_multi_step.last_subproblem_residual_norm_inf)
+    println("ppa_full_cache_size:                   ", result_ppa_full.cache_size)
+    println("ppa_full_objective_cache_hit_rate:     ", result_ppa_full.objective_cache_hit_rate)
+    println("ppa_full_subgradient_cache_hit_rate:   ", result_ppa_full.subgradient_cache_hit_rate)
+    println("ppa_full_stop_reason:                  ", result_ppa_full.stop_reason)
+    println("ppa_full_iters:                        ", result_ppa_full.ppa_iters)
 
     println("======================================")
     println()
@@ -636,7 +562,6 @@ end
 # ============================================================
 
 df_results = DataFrame(results)
-
 CSV.write(results_filepath, df_results)
 
 println("Saved results to: $results_filepath")

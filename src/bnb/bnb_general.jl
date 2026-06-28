@@ -11,7 +11,7 @@ using DataStructures: BinaryMaxHeap
 # Main options:
 #   - relaxation = DDGFact, DDGFactplus, or DDGFactplusUpsilon
 #   - fixing_rule = :none, :dual, :primal, or :both
-#   - calibration_method = :bfgs, :rbfgs, or :prox_step for DDGFactplusUpsilon
+#   - calibration_method = :bfgs, :ppa_one, or :ppa_full for DDGFactplusUpsilon
 #   - root_calibration_params controls root-node Upsilon calibration
 #   - node_calibration_params controls child/rebound-node Upsilon calibration
 # =============================================================================
@@ -397,7 +397,7 @@ Main options:
 
   - `relaxation = DDGFact`, `DDGFactplus`, or `DDGFactplusUpsilon`.
   - `fixing_rule = :none`, `:dual`, `:primal`, or `:both`.
-  - `calibration_method = :bfgs`, `:rbfgs`, or `:prox_step` for DDGFactplusUpsilon.
+  - `calibration_method = :bfgs`, `:ppa_one`, or `:ppa_full` for DDGFactplusUpsilon.
   - `root_calibration_params` controls root-node Upsilon calibration.
   - `node_calibration_params` controls all child and rebound node calibrations.
 

@@ -51,8 +51,8 @@ end
 function _normalize_calibration_method(calibration_method)
     m = calibration_method isa Symbol ? calibration_method : Symbol(calibration_method)
 
-    if m ∉ (:bfgs, :rbfgs, :prox_step)
-        error("calibration_method must be one of :bfgs, :rbfgs, or :prox_step.")
+    if m ∉ (:bfgs, :ppa_one, :ppa_full)
+        error("calibration_method must be one of :bfgs, :ppa_one, or :ppa_full.")
     end
 
     return m
@@ -268,94 +268,36 @@ function _calibrate_upsilon_bfgs_from_params(
 end
 
 
-function _calibrate_upsilon_rbfgs_from_params(
+function _calibrate_upsilon_ppa_from_params(
     C::Symmetric{<:Real,<:AbstractMatrix},
     s::Int,
     t::Int,
     param_set;
     J1::AbstractVector{<:Integer} = Int[],
     atol::Float64 = 1e-10,
+    default_k::Real = 1,
 )
-    return solve_regularized_bfgs_upsilon_calibration(
+    return calibrate_upsilon_ppa_ddfactplus(
         C,
         s,
         t;
         J1 = J1,
-        q0 = nothing,
-
-        atol = atol,
-        psi_margin = get(param_set, :psi_margin, 1e-7),
-        psi_floor = get(param_set, :psi_floor, 0.0),
-        psi_derivative = get(param_set, :psi_derivative, true),
-        t1_reformulation = get(param_set, :t1_reformulation, false),
-
-        q_bound = get(param_set, :q_bound, Inf),
-        max_q_norm_inf = get(param_set, :max_q_norm_inf, 20.0),
-
-        max_iter = get(param_set, :max_iter, get(param_set, :max_regbfgs_iter, 50)),
-
-        B0_scale = get(param_set, :B0_scale, 1.0),
-
-        mu0 = get(param_set, :mu0, 1e-2),
-        mu_min = get(param_set, :mu_min, 1e-10),
-        mu_max = get(param_set, :mu_max, 1e8),
-        mu_decrease = get(param_set, :mu_decrease, 0.2),
-        mu_increase = get(param_set, :mu_increase, 5.0),
-        eta1 = get(param_set, :eta1, 0.05),
-        eta2 = get(param_set, :eta2, 0.75),
-        max_inner_regularization = get(param_set, :max_inner_regularization, 20),
-
-        normalize_direction = get(param_set, :normalize_direction, false),
-        max_direction_norm = get(param_set, :max_direction_norm, 10.0),
-
-        armijo_c1 = get(param_set, :armijo_c1, 1e-4),
-        accept_tol = get(param_set, :accept_tol, 1e-12),
-        alpha0 = get(param_set, :alpha0, 1.0),
-        alpha_min = get(param_set, :alpha_min, 1e-12),
-        alpha_decay = get(param_set, :alpha_decay, 0.5),
-        max_backtracks = get(param_set, :max_backtracks, 30),
-
-        nonmonotone = get(param_set, :nonmonotone, true),
-        nonmonotone_window = get(param_set, :nonmonotone_window, 10),
-
-        curvature_tol = get(param_set, :curvature_tol, 1e-12),
-        damping_delta = get(param_set, :damping_delta, 0.2),
-        reset_B_on_failed_update = get(param_set, :reset_B_on_failed_update, false),
-
-        project_spd = get(param_set, :project_spd, true),
-        min_B_eig = get(param_set, :min_B_eig, 1e-8),
-        max_B_eig = get(param_set, :max_B_eig, 1e8),
-        reset_B_on_bad = get(param_set, :reset_B_on_bad, true),
-        max_B_norm = get(param_set, :max_B_norm, 1e8),
-
-        grad_tol = get(param_set, :grad_tol, 1e-8),
-        step_tol = get(param_set, :step_tol, 1e-10),
-
-        cache_digits = get(param_set, :cache_digits, 12),
-        diagnostics = get(param_set, :diagnostics, false),
-        verbose = get(param_set, :verbose, get(param_set, :verbose_regbfgs, false)),
-    )
-end
-
-
-function _calibrate_upsilon_prox_step_from_params(
-    C::Symmetric{<:Real,<:AbstractMatrix},
-    s::Int,
-    t::Int,
-    param_set;
-    J1::AbstractVector{<:Integer} = Int[],
-    atol::Float64 = 1e-10,
-)
-    return solve_one_step_proximal_knitro_upsilon_calibration(
-        C,
-        s,
-        t;
-        J1 = J1,
-        J0 = Int[],
+        J0 = get(param_set, :J0, Int[]),
 
         theta0 = get(param_set, :theta0, nothing),
 
-        rho = get(param_set, :rho, 1e-3),
+        # k = 1 gives one PPA iteration.
+        # k = Inf gives full PPA.
+        k = get(param_set, :k, default_k),
+
+        rho = get(param_set, :rho, 1e3),
+
+        # Full-PPA stopping criteria.
+        # For k = 1 these are harmless; the method stops after one iteration.
+        grad_tol = get(param_set, :grad_tol, 1e-2),
+        prox_obj_abs_tol = get(param_set, :prox_obj_abs_tol, 1e-8),
+        prox_step_tol = get(param_set, :prox_step_tol, 1e-8),
+        max_wall_time = get(param_set, :max_wall_time, Inf),
 
         theta_perturbation = get(param_set, :theta_perturbation, 1e-2),
         center_initial_theta = get(param_set, :center_initial_theta, false),
@@ -414,24 +356,29 @@ function _calibrate_upsilon_from_params(
             J1 = J1,
             atol = atol,
         )
-    elseif method == :rbfgs
-        return _calibrate_upsilon_rbfgs_from_params(
+
+    elseif method == :ppa_one
+        return _calibrate_upsilon_ppa_from_params(
             C,
             s,
             t,
             calibration_params;
             J1 = J1,
             atol = atol,
+            default_k = 1,
         )
-    elseif method == :prox_step
-        return _calibrate_upsilon_prox_step_from_params(
+
+    elseif method == :ppa_full
+        return _calibrate_upsilon_ppa_from_params(
             C,
             s,
             t,
             calibration_params;
             J1 = J1,
             atol = atol,
+            default_k = Inf,
         )
+
     else
         error("Unknown calibration method: $(method).")
     end
