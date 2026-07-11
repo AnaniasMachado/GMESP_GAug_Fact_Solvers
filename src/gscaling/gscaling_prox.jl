@@ -1,39 +1,3 @@
-# =============================================================================
-# gscaling_prox.jl
-#
-# Proximal-point calibration for the original spectral DDGFact+_Upsilon
-# formulation.
-#
-# This solves a sequence of proximal subproblems:
-#
-#     minimize_theta  V(theta) + (1 / (2 * rho)) * ||theta - theta_center||^2
-#
-# where V(theta) is the original DDGFact+_Upsilon calibration value:
-#
-#     V(theta) = DDGFact+_Upsilon(C, s, t; gamma = exp(theta), psi(theta))
-#
-# Each evaluation of V(theta) calls:
-#
-#     eval_ddfactplus_upsilon_calibration_objective(...)
-#
-# The subgradient is computed lazily, only when needed, using:
-#
-#     eval_ddfactplus_upsilon_calibration_subgradient(...)
-#
-# The proximal subproblem is solved only with Knitro.
-#
-# Required includes before this file:
-#
-#     include("gscaling_util.jl")
-#
-# and all files defining:
-#
-#     add_knitro_options!
-#     aug_ddfact_upsilon_gmesp
-#     ddfact_upsilon_t1_knitro
-#
-# =============================================================================
-
 using LinearAlgebra
 using JuMP
 using KNITRO

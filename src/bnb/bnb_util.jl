@@ -51,11 +51,28 @@ end
 function _normalize_calibration_method(calibration_method)
     m = calibration_method isa Symbol ? calibration_method : Symbol(calibration_method)
 
-    if m ∉ (:bfgs, :ppa_one, :ppa_full)
-        error("calibration_method must be one of :bfgs, :ppa_one, or :ppa_full.")
+    if m ∉ (
+        :bfgs,
+        :ppa_one,
+        :ppa_full,
+        :pf_lmo_lmo,
+        :pf_lmo_po,
+        :pf_po_lmo,
+    )
+        error(
+            "calibration_method must be one of :bfgs, :ppa_one, :ppa_full, " *
+            ":pf_lmo_lmo, :pf_lmo_po, or :pf_po_lmo."
+        )
     end
 
     return m
+end
+
+
+function _calibration_method_uses_knitro(calibration_method::Symbol)
+    method = _normalize_calibration_method(calibration_method)
+
+    return method in (:bfgs, :ppa_one, :ppa_full)
 end
 
 
@@ -238,7 +255,7 @@ function _calibrate_upsilon_bfgs_from_params(
         s,
         t;
         J1 = J1,
-        theta0 = nothing,
+        theta0 = get(param_set, :theta0, nothing),
         atol = atol,
         max_iter = get(param_set, :max_iter, get(param_set, :max_bfgs_iter, 20)),
         grad_tol = get(param_set, :grad_tol, 1e-6),
@@ -336,6 +353,75 @@ function _calibrate_upsilon_ppa_from_params(
 end
 
 
+function _calibrate_upsilon_projection_free_from_params(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    s::Int,
+    t::Int,
+    param_set;
+    algorithm::Symbol,
+    J1::AbstractVector{<:Integer} = Int[],
+    atol::Float64 = 1e-10,
+)
+    result = calibrate_upsilon_projection_free_ddfactplus(
+        C,
+        s,
+        t;
+        algorithm = algorithm,
+
+        J1 = J1,
+        J0 = get(param_set, :J0, Int[]),
+
+        theta0 = get(param_set, :theta0, nothing),
+        x0 = get(param_set, :x0, nothing),
+        y0 = get(param_set, :y0, nothing),
+
+        max_iter = get(param_set, :max_iter, 500),
+        min_iter = get(param_set, :min_iter, 100),
+        iteration_power = get(param_set, :iteration_power, 1.5),
+
+        theta_bound = get(param_set, :theta_bound, 20.0),
+
+        tau0 = get(param_set, :tau0, 0.02),
+        tau_power = get(param_set, :tau_power, 2.0 / 3.0),
+
+        beta0 = get(param_set, :beta0, 1.0),
+        beta_power = get(param_set, :beta_power, 1.0 / 6.0),
+
+        Lqq_hat = get(param_set, :Lqq_hat, 1.0),
+
+        psi_margin = get(param_set, :psi_margin, 1e-7),
+        psi_floor = get(param_set, :psi_floor, 0.0),
+        psi_derivative = get(param_set, :psi_derivative, true),
+        atol = atol,
+
+        gurobi_output_flag = get(param_set, :gurobi_output_flag, 0),
+        gurobi_opttol = get(param_set, :gurobi_opttol, 1e-8),
+        gurobi_feastol = get(param_set, :gurobi_feastol, 1e-8),
+
+        diagnostics = get(param_set, :diagnostics, false),
+        verbose = get(param_set, :verbose, false),
+    )
+
+    gamma = exp.(result.theta)
+
+    psi_node, lambda_min = max_feasible_psi(
+        C,
+        gamma;
+        psi_margin = get(param_set, :psi_margin, 1e-7),
+        psi_floor = get(param_set, :psi_floor, 0.0),
+    )
+
+    return merge(
+        result,
+        (
+            gamma = gamma,
+            psi = psi_node,
+            lambda_min = lambda_min,
+        ),
+    )
+end
+
+
 function _calibrate_upsilon_from_params(
     C::Symmetric{<:Real,<:AbstractMatrix},
     s::Int,
@@ -377,6 +463,39 @@ function _calibrate_upsilon_from_params(
             J1 = J1,
             atol = atol,
             default_k = Inf,
+        )
+
+    elseif method == :pf_lmo_lmo
+        return _calibrate_upsilon_projection_free_from_params(
+            C,
+            s,
+            t,
+            calibration_params;
+            algorithm = :lmo_lmo,
+            J1 = J1,
+            atol = atol,
+        )
+
+    elseif method == :pf_lmo_po
+        return _calibrate_upsilon_projection_free_from_params(
+            C,
+            s,
+            t,
+            calibration_params;
+            algorithm = :lmo_po,
+            J1 = J1,
+            atol = atol,
+        )
+
+    elseif method == :pf_po_lmo
+        return _calibrate_upsilon_projection_free_from_params(
+            C,
+            s,
+            t,
+            calibration_params;
+            algorithm = :po_lmo,
+            J1 = J1,
+            atol = atol,
         )
 
     else
@@ -428,6 +547,7 @@ function _determined_node(
     psi_margin::Float64,
     psi_floor::Float64,
     upsilon_fixing::Symbol,
+    fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
 )
     if relaxation == :DDGFact
         local ub_node
@@ -442,7 +562,6 @@ function _determined_node(
         end
 
         _add_bnb_timing!(:relaxation_solve_time, bound_time)
-        _add_bnb_timing!(:knitro_time, bound_time)
         _add_bnb_timing!(:bound_computation_time, bound_time)
 
         return (
@@ -486,7 +605,6 @@ function _determined_node(
         end
 
         _add_bnb_timing!(:relaxation_solve_time, bound_time)
-        _add_bnb_timing!(:knitro_time, bound_time)
         _add_bnb_timing!(:bound_computation_time, bound_time)
 
         return (
@@ -506,33 +624,27 @@ function _determined_node(
         )
 
     else
-        local fix1
+        fixed_gamma === nothing &&
+            error(
+                "fixed_gamma is required for a determined DDGFactplusUpsilon node. " *
+                "Use the gamma from the last calibration."
+            )
+
+        local gamma
+        local psi_node
 
         setup_time = @elapsed begin
-            fix1 = _local_fix1_indices(keep, F1)
-        end
+            gamma = copy(fixed_gamma)
 
-        _add_bnb_timing!(:node_setup_time, setup_time)
-
-        local calib
-
-        calibration_time = @elapsed begin
-            calib = _calibrate_upsilon_from_params(
+            psi_node, _ = max_feasible_psi(
                 Ck,
-                s,
-                t,
-                calibration_method,
-                calibration_params;
-                J1 = fix1,
-                atol = atol,
+                gamma;
+                psi_margin = get(calibration_params, :psi_margin, psi_margin),
+                psi_floor = get(calibration_params, :psi_floor, psi_floor),
             )
         end
 
-        _add_bnb_timing!(:upsilon_calibration_time, calibration_time)
-        _add_bnb_timing!(:knitro_time, calibration_time)
-
-        gamma = calib.gamma
-        psi_node = calib.psi
+        _add_bnb_timing!(:node_setup_time, setup_time)
 
         local ub_node
         local y
@@ -550,11 +662,7 @@ function _determined_node(
         end
 
         _add_bnb_timing!(:factorization_time, value_time)
-
-        _add_bnb_timing!(
-            :bound_computation_time,
-            calibration_time + value_time,
-        )
+        _add_bnb_timing!(:bound_computation_time, value_time)
 
         return (
             ub = ub_node,
@@ -570,7 +678,7 @@ function _determined_node(
             psi = psi_node,
             F = F,
             primal_obj = ub_node,
-            calibration = calib,
+            calibration = nothing,
             upsilon_fixing = upsilon_fixing,
         )
     end
@@ -641,7 +749,6 @@ function _bound_ddgfactplus_node(
     atol::Float64,
     psi_margin::Float64,
     psi_floor::Float64,
-    need_dual::Bool = true,
 )
     psi_node =
         psi === nothing ?
@@ -675,26 +782,38 @@ function _bound_ddgfactplus_node(
 
     local dual_sol
 
-    if need_dual
-        dual_time = @elapsed begin
-            dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
-                x,
-                F,
-                s,
-                t,
-                psi_node;
-                l = l,
-                c = c,
-                atol = atol,
-            )
-        end
-
-        _add_bnb_timing!(:dual_solution_time, dual_time)
-    else
-        dual_sol = nothing
+    dual_time = @elapsed begin
+        dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
+            x,
+            F,
+            s,
+            t,
+            psi_node;
+            l = l,
+            c = c,
+            atol = atol,
+        )
     end
 
+    _add_bnb_timing!(:dual_solution_time, dual_time)
+
     return x, primal_obj, F, dual_sol, psi_node
+end
+
+
+function _require_calibration_xy(calib, calibration_method::Symbol)
+    if calib === nothing
+        error("Calibration method $(calibration_method) returned nothing.")
+    end
+
+    if !(:x in propertynames(calib)) || !(:y in propertynames(calib))
+        error(
+            "Calibration method $(calibration_method) must return x and y " *
+            "when calibrated nodes use calibration iterates directly."
+        )
+    end
+
+    return Vector{Float64}(calib.x), Vector{Float64}(calib.y)
 end
 
 
@@ -712,7 +831,6 @@ function _bound_ddgfactplus_upsilon_node(
     psi_floor::Float64,
     calibrate_upsilon::Bool = true,
     fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
-    need_dual::Bool = true,
 )
     local x
     local y
@@ -721,13 +839,15 @@ function _bound_ddgfactplus_upsilon_node(
     local psi_node
     local calib
 
+    method = _normalize_calibration_method(calibration_method)
+
     if calibrate_upsilon
         calibration_time = @elapsed begin
             calib = _calibrate_upsilon_from_params(
                 Ck,
                 s,
                 t,
-                calibration_method,
+                method,
                 calibration_params;
                 J1 = fix1,
                 atol = atol,
@@ -735,26 +855,33 @@ function _bound_ddgfactplus_upsilon_node(
         end
 
         _add_bnb_timing!(:upsilon_calibration_time, calibration_time)
-        _add_bnb_timing!(:knitro_time, calibration_time)
+
+        if _calibration_method_uses_knitro(method)
+            _add_bnb_timing!(:knitro_time, calibration_time)
+        end
 
         gamma = calib.gamma
         psi_node = calib.psi
-        x = copy(calib.x)
-        y = copy(calib.y)
-        primal_obj = calib.obj
     else
         fixed_gamma === nothing &&
             error("fixed_gamma is required when calibrate_upsilon = false.")
 
+        calib = nothing
         gamma = copy(fixed_gamma)
 
-        psi_node, λmin = max_feasible_psi(
+        psi_node, _ = max_feasible_psi(
             Ck,
             gamma;
             psi_margin = get(calibration_params, :psi_margin, psi_margin),
             psi_floor = get(calibration_params, :psi_floor, psi_floor),
         )
+    end
 
+    if calibrate_upsilon
+        x, y = _require_calibration_xy(calib, method)
+
+        primal_obj = NaN
+    else
         relaxation_time = @elapsed begin
             x, y, primal_obj = aug_ddfact_upsilon_gmesp(
                 Ck,
@@ -763,6 +890,8 @@ function _bound_ddgfactplus_upsilon_node(
                 t,
                 psi_node;
                 J1 = fix1,
+                x0 = nothing,
+                y0 = nothing,
                 atol = atol,
                 knitro_outlev = get(
                     calibration_params,
@@ -784,8 +913,6 @@ function _bound_ddgfactplus_upsilon_node(
 
         _add_bnb_timing!(:relaxation_solve_time, relaxation_time)
         _add_bnb_timing!(:knitro_time, relaxation_time)
-
-        calib = nothing
     end
 
     local F
@@ -801,7 +928,25 @@ function _bound_ddgfactplus_upsilon_node(
 
     _add_bnb_timing!(:factorization_time, factorization_time)
 
-    dual_sol = nothing
+    local dual_sol
+
+    dual_time = @elapsed begin
+        dual_sol = DGFactplusUpsilon_dual_solution_from_DDGFactplusUpsilon_xy(
+            x,
+            gamma,
+            F,
+            s,
+            t,
+            psi_node;
+            yhat = y,
+            l = l,
+            c = c,
+            atol = atol,
+            silent = true,
+        )
+    end
+
+    _add_bnb_timing!(:dual_solution_time, dual_time)
 
     return x, y, primal_obj, gamma, psi_node, F, dual_sol, calib
 end
@@ -823,7 +968,7 @@ function _gmesp_node(
     upsilon_fixing::Symbol = :simple,
     calibrate_upsilon::Bool = true,
     fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
-    need_dual::Bool = true,
+    warm_start::Bool = false,
 )
     relaxation = _normalize_relaxation(relaxation)
     calibration_method = _normalize_calibration_method(calibration_method)
@@ -883,6 +1028,7 @@ function _gmesp_node(
             psi_margin = psi_margin,
             psi_floor = psi_floor,
             upsilon_fixing = upsilon_fixing,
+            fixed_gamma = fixed_gamma,
         )
     end
 
@@ -957,14 +1103,13 @@ function _gmesp_node(
                     atol = atol,
                     psi_margin = psi_margin,
                     psi_floor = psi_floor,
-                    need_dual = need_dual,
                 )
         end
 
         _add_bnb_timing!(:bound_computation_time, bound_time)
 
         return (
-            ub = dual_sol === nothing ? primal_obj : dual_sol.objective_value,
+            ub = dual_sol.objective_value,
             x = x,
             y = Float64[],
             keep = keep,
@@ -1005,14 +1150,13 @@ function _gmesp_node(
                     psi_floor = psi_floor,
                     calibrate_upsilon = calibrate_upsilon,
                     fixed_gamma = fixed_gamma,
-                    need_dual = need_dual,
                 )
         end
 
         _add_bnb_timing!(:bound_computation_time, bound_time)
 
         return (
-            ub = primal_obj,
+            ub = dual_sol.objective_value,
             x = x,
             y = y,
             keep = keep,

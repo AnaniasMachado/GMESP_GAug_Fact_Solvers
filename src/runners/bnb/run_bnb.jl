@@ -8,20 +8,21 @@ using KNITRO
 using Printf
 import MathOptInterface as MOI
 
-include("../misc/util.jl")
-include("../misc/heuristics.jl")
-include("../solvers/solver_knitro.jl")
+include("../../misc/util.jl")
+include("../../misc/heuristics.jl")
+include("../../solvers/solver_knitro.jl")
 
-include("../gscaling/gscaling_util.jl")
-include("../gscaling/gscaling_bfgs.jl")
-include("../gscaling/gscaling_prox.jl")
-include("../gscaling/gscaling_params.jl")
+include("../../gscaling/gscaling_util.jl")
+include("../../gscaling/gscaling_bfgs.jl")
+include("../../gscaling/gscaling_prox.jl")
+include("../../gscaling/gscaling_projection_free.jl")
+include("../../gscaling/gscaling_params.jl")
 
-include("../misc/dual.jl")
-include("../misc/var_fixing.jl")
+include("../../misc/dual.jl")
+include("../../misc/var_fixing.jl")
 
-include("../bnb/bnb_util.jl")
-include("../bnb/bnb_general.jl")
+include("../../bnb/bnb_util.jl")
+include("../../bnb/bnb_general.jl")
 
 
 # ============================================================
@@ -48,18 +49,6 @@ n = size(C, 1)
 # ============================================================
 # B&B reformulations / calibration algorithms
 # ============================================================
-#
-# We solve:
-#
-#   1 row: DDGFactplus
-#
-#   6 rows: DDGFactplusUpsilon with BFGS
-#   6 rows: DDGFactplusUpsilon with one PPA iteration
-#   6 rows: DDGFactplusUpsilon with full PPA
-#
-# Each Upsilon method is tested with recalibrate_k in [1, 2, 4, 6, 8, 10].
-#
-# ============================================================
 
 recalibrate_k_values = [1, 2, 4, 6, 8, 10]
 
@@ -77,7 +66,9 @@ runs = vcat(
             calibration_method = method,
             recalibrate_k = kk,
         )
-        for method in [:bfgs, :ppa_one, :ppa_full]
+        # for method in [:bfgs, :ppa_one, :ppa_full]
+        # for method in [:pf_lmo_lmo, :pf_lmo_po, :pf_po_lmo]
+        for method in [:pf_po_lmo]
         for kk in recalibrate_k_values
     ],
 )
@@ -103,6 +94,10 @@ fixing_rule = :dual
 # Used only when relaxation = DDGFactplusUpsilon and fixing_rule includes :dual.
 upsilon_fixing = :simple
 
+# If true, recalibrated DDGFactplusUpsilon child nodes start from
+# theta0 = log.(parent.gamma) restricted to the child keep set.
+warm_start = true
+
 
 # ============================================================
 # Calibration parameter-set labels
@@ -116,6 +111,15 @@ node_ppa_one_param_label = :node
 
 root_ppa_full_param_label = :root
 node_ppa_full_param_label = :node
+
+root_lmo_lmo_param_label = :root
+node_lmo_lmo_param_label = :node
+
+root_lmo_po_param_label = :root
+node_lmo_po_param_label = :node
+
+root_po_lmo_param_label = :root
+node_po_lmo_param_label = :node
 
 
 function _calibration_config(method::Symbol)
@@ -145,6 +149,33 @@ function _calibration_config(method::Symbol)
             root_label = root_ppa_full_param_label,
             node_label = node_ppa_full_param_label,
         )
+    
+    elseif method == :pf_lmo_lmo
+        return (
+            solver_method = :pf_lmo_lmo,
+            root_params = copy(pf_lmo_lmo_param_sets[root_lmo_lmo_param_label]),
+            node_params = copy(pf_lmo_lmo_param_sets[node_lmo_lmo_param_label]),
+            root_label = root_lmo_lmo_param_label,
+            node_label = node_lmo_lmo_param_label,
+        )
+    
+    elseif method == :pf_lmo_po
+        return (
+            solver_method = :pf_lmo_po,
+            root_params = copy(pf_lmo_po_param_sets[root_lmo_po_param_label]),
+            node_params = copy(pf_lmo_po_param_sets[node_lmo_po_param_label]),
+            root_label = root_lmo_po_param_label,
+            node_label = node_lmo_po_param_label,
+        )
+    
+    elseif method == :pf_po_lmo
+        return (
+            solver_method = :pf_po_lmo,
+            root_params = copy(pf_po_lmo_param_sets[root_po_lmo_param_label]),
+            node_params = copy(pf_po_lmo_param_sets[node_po_lmo_param_label]),
+            root_label = root_po_lmo_param_label,
+            node_label = node_po_lmo_param_label,
+        )
 
     elseif method == :none
         # The calibration method is ignored for DDGFact and DDGFactplus,
@@ -160,7 +191,8 @@ function _calibration_config(method::Symbol)
     else
         error(
             "Unknown calibration method: $method. " *
-            "Expected :none, :bfgs, :ppa_one, or :ppa_full."
+            "Expected :none, :bfgs, :ppa_one, :ppa_full, " *
+            ":pf_lmo_lmo, :pf_lmo_po, or :pf_po_lmo."
         )
     end
 end
@@ -189,8 +221,10 @@ psi_floor = 0.0
 
 mkpath("results")
 
+warm_tag = warm_start ? "warm" : "cold"
+
 results_filepath =
-    "results/bnb_data$(data_n)_n$(n)_s$(s)_t$(t).csv"
+    "results/bnb_data$(data_n)_n$(n)_s$(s)_t$(t)_po_lmo_adp_50.csv"
 
 cols = [
     :data_n,
@@ -207,6 +241,7 @@ cols = [
     :node_calibration_param_set,
     :upsilon_fixing,
     :recalibrate_k,
+    :warm_start,
 
     # B&B gaps.
     :bnb_gap,
@@ -253,19 +288,26 @@ CSV.write(results_filepath, DataFrame([c => Any[] for c in cols]))
 
 
 println("="^82)
-println("GMESP B&B test: DDGFactplus, BFGS-Upsilon, one-PPA-Upsilon, full-PPA-Upsilon")
+println("GMESP B&B test: DDGFact, DDGFactplus, DDGFactplusUpsilon")
 println("data_n:                         $data_n")
 println("n:                              $n")
 println("s:                              $s")
 println("t:                              $t")
 println("fixing_rule:                    $fixing_rule")
 println("upsilon_fixing:                 $upsilon_fixing")
+println("warm_start:                     $warm_start")
 println("root_bfgs_param_set:            $root_bfgs_param_label")
 println("node_bfgs_param_set:            $node_bfgs_param_label")
 println("root_ppa_one_param_set:         $root_ppa_one_param_label")
 println("node_ppa_one_param_set:         $node_ppa_one_param_label")
 println("root_ppa_full_param_set:        $root_ppa_full_param_label")
 println("node_ppa_full_param_set:        $node_ppa_full_param_label")
+println("root_lmo_lmo_param_set:         $root_lmo_lmo_param_label")
+println("node_lmo_lmo_param_set:         $node_lmo_lmo_param_label")
+println("root_lmo_po_param_set:          $root_lmo_po_param_label")
+println("node_lmo_po_param_set:          $node_lmo_po_param_label")
+println("root_po_lmo_param_set:          $root_po_lmo_param_label")
+println("node_po_lmo_param_set:          $node_po_lmo_param_label")
 println("recalibrate_k_values:           $recalibrate_k_values")
 println("time_limit:                     $time_limit")
 println("results_filepath:               $results_filepath")
@@ -325,6 +367,7 @@ for run in runs
                 node_calibration_params = cfg.node_params,
                 upsilon_fixing = upsilon_fixing,
                 recalibrate_k = recalibrate_k_run,
+                warm_start = warm_start,
                 atol = atol,
                 psi_margin = psi_margin,
                 psi_floor = psi_floor,
@@ -344,6 +387,7 @@ for run in runs
                 root_calibration_params = cfg.root_params,
                 node_calibration_params = cfg.node_params,
                 upsilon_fixing = upsilon_fixing,
+                warm_start = warm_start,
                 atol = atol,
                 psi_margin = psi_margin,
                 psi_floor = psi_floor,
@@ -438,6 +482,7 @@ for run in runs
         String(cfg.node_label),
         String(upsilon_fixing),
         recalibrate_k_out,
+        st.warm_start,
 
         st.gap,
         bnb_root_gap,
@@ -483,6 +528,7 @@ for run in runs
             node_calibration_param_set = cfg.node_label,
             solver_used = solver_used,
             recalibrate_k = recalibrate_k_out,
+            warm_start = st.warm_start,
             S_best = S_best,
             st = st,
             runtime = runtime,
@@ -580,6 +626,10 @@ for run in runs
         println("upsilon_fixing:                    ", st.upsilon_fixing)
     end
 
+    if hasproperty(st, :warm_start)
+        println("warm_start:                        ", st.warm_start)
+    end
+
     println("Appended row to:                   ", results_filepath)
     flush(stdout)
 end
@@ -607,12 +657,13 @@ for r in results
     st = r.st
 
     @printf(
-        "%-22s  calib=%-10s  root=%-12s  node=%-12s  recalib=%-7s  lb=% .8f  ub=% .8f  gap=% .3e  root_ub=% .8f  nodes=%8d  wall=%8.2fs%s\n",
+        "%-22s  calib=%-10s  root=%-12s  node=%-12s  recalib=%-7s  warm=%-5s  lb=% .8f  ub=% .8f  gap=% .3e  root_ub=% .8f  nodes=%8d  wall=%8.2fs%s\n",
         r.relaxation,
         r.calibration_method,
         String(r.root_calibration_param_set),
         String(r.node_calibration_param_set),
         ismissing(r.recalibrate_k) ? "missing" : string(r.recalibrate_k),
+        string(r.warm_start),
         st.lb,
         st.ub,
         st.gap,

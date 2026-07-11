@@ -281,3 +281,210 @@ ppa_full_param_sets = Dict(
         :verbose => false,
     ),
 )
+
+
+# ============================================================
+# Projection-free LMO-LMO parameter sets
+#
+# These are for:
+#
+#     calibrate_upsilon_projection_free_ddfactplus(...; algorithm = :lmo_lmo, ...)
+#
+# ============================================================
+pf_lmo_lmo_param_sets = Dict(
+    :root => Dict{Symbol,Any}(
+        :algorithm => :lmo_lmo,
+
+        :max_iter => 500,
+        :min_iter => 250,
+        :iteration_power => 1.5,
+
+        :theta_bound => 20.0,
+
+        :tau0 => 0.10,
+        :tau_power => 1.05,
+
+        :beta0 => 0.18,
+        :beta_power => 1.0 / 4.0,
+
+        :Lqq_hat => 0.52,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+
+        :gurobi_output_flag => 0,
+        :gurobi_opttol => 1e-8,
+        :gurobi_feastol => 1e-8,
+
+        :diagnostics => false,
+        :verbose => false,
+    ),
+
+    :node => Dict{Symbol,Any}(
+        :algorithm => :lmo_lmo,
+
+        :max_iter => 500,
+        :min_iter => 250,
+        :iteration_power => 1.5,
+
+        :theta_bound => 20.0,
+
+        :tau0 => 0.10,
+        :tau_power => 1.05,
+
+        :beta0 => 0.18,
+        :beta_power => 1.0 / 4.0,
+
+        :Lqq_hat => 0.52,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+
+        :gurobi_output_flag => 0,
+        :gurobi_opttol => 1e-8,
+        :gurobi_feastol => 1e-8,
+
+        :diagnostics => false,
+        :verbose => false,
+    ),
+)
+
+
+# ============================================================
+# Projection-free LMO-PO parameter sets
+#
+# These are for:
+#
+#     calibrate_upsilon_projection_free_ddfactplus(...; algorithm = :lmo_po, ...)
+#
+# ============================================================
+pf_lmo_po_param_sets = Dict(
+    :root => Dict{Symbol,Any}(
+        :algorithm => :lmo_po,
+
+        :max_iter => 500,
+        :min_iter => 250,
+        :iteration_power => 1.5,
+
+        :theta_bound => 20.0,
+
+        :tau0 => 0.0525,
+        :tau_power => 1.00,
+
+        :beta0 => 0.55,
+        :beta_power => 0.40,
+
+        :Lqq_hat => 0.65,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+
+        :gurobi_output_flag => 0,
+        :gurobi_opttol => 1e-8,
+        :gurobi_feastol => 1e-8,
+
+        :diagnostics => false,
+        :verbose => false,
+    ),
+
+    :node => Dict{Symbol,Any}(
+        :algorithm => :lmo_po,
+
+        :max_iter => 500,
+        :min_iter => 250,
+        :iteration_power => 1.5,
+
+        :theta_bound => 20.0,
+
+        :tau0 => 0.0525,
+        :tau_power => 1.00,
+
+        :beta0 => 0.55,
+        :beta_power => 0.40,
+
+        :Lqq_hat => 0.65,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+
+        :gurobi_output_flag => 0,
+        :gurobi_opttol => 1e-8,
+        :gurobi_feastol => 1e-8,
+
+        :diagnostics => false,
+        :verbose => false,
+    ),
+)
+
+
+# ============================================================
+# Projection-free PO-LMO parameter sets
+#
+# These are for:
+#
+#     calibrate_upsilon_projection_free_ddfactplus(...; algorithm = :po_lmo, ...)
+#
+# ============================================================
+pf_po_lmo_param_sets = Dict(
+    :root => Dict{Symbol,Any}(
+        :algorithm => :po_lmo,
+
+        :max_iter => 500,
+        :min_iter => 250,
+        :iteration_power => 1.5,
+
+        :theta_bound => 20.0,
+
+        :tau0 => 1.00,
+        :tau_power => 2.0 / 3.0,
+
+        :beta0 => 0.10,
+        :beta_power => 1.0 / 6.0,
+
+        :Lqq_hat => 0.50,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+
+        :gurobi_output_flag => 0,
+        :gurobi_opttol => 1e-8,
+        :gurobi_feastol => 1e-8,
+
+        :diagnostics => false,
+        :verbose => false,
+    ),
+
+    :node => Dict{Symbol,Any}(
+        :algorithm => :po_lmo,
+
+        :max_iter => 500,
+        :min_iter => 50,
+        :iteration_power => 1.5,
+
+        :theta_bound => 20.0,
+
+        :tau0 => 1.00,
+        :tau_power => 2.0 / 3.0,
+
+        :beta0 => 0.10,
+        :beta_power => 1.0 / 6.0,
+
+        :Lqq_hat => 0.50,
+
+        :psi_margin => 1e-7,
+        :psi_floor => 0.0,
+        :psi_derivative => true,
+
+        :gurobi_output_flag => 0,
+        :gurobi_opttol => 1e-8,
+        :gurobi_feastol => 1e-8,
+
+        :diagnostics => false,
+        :verbose => false,
+    ),
+)

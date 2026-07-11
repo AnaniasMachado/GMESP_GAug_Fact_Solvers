@@ -11,9 +11,11 @@ using DataStructures: BinaryMaxHeap
 # Main options:
 #   - relaxation = DDGFact, DDGFactplus, or DDGFactplusUpsilon
 #   - fixing_rule = :none, :dual, :primal, or :both
-#   - calibration_method = :bfgs, :ppa_one, or :ppa_full for DDGFactplusUpsilon
+#   - calibration_method = :bfgs, :ppa_one, :ppa_full,
+#     :pf_lmo_lmo, :pf_lmo_po, or :pf_po_lmo for DDGFactplusUpsilon
 #   - root_calibration_params controls root-node Upsilon calibration
 #   - node_calibration_params controls child/rebound-node Upsilon calibration
+#   - warm_start = true initializes each recalibrated child from log(parent.gamma)
 # =============================================================================
 
 
@@ -93,7 +95,7 @@ function _make_node_kwargs(;
     psi_margin,
     psi_floor,
     upsilon_fixing,
-    need_dual,
+    warm_start,
 )
     return (
         relaxation = relaxation,
@@ -104,7 +106,7 @@ function _make_node_kwargs(;
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
-        need_dual = need_dual,
+        warm_start = warm_start,
     )
 end
 
@@ -160,14 +162,32 @@ function _bound_child!(
         parent.gamma === nothing ||
         child_depth % recalibrate_k == 0
 
+    parent_gamma_child =
+        node_kwargs.relaxation == :DDGFactplusUpsilon && parent.gamma !== nothing ?
+        _restrict_gamma_to_child_keep(parent.keep, parent.gamma, child_keep) :
+        nothing
+
     fixed_gamma_child =
-        recalibrate_child || node_kwargs.relaxation != :DDGFactplusUpsilon ?
-        nothing :
-        _restrict_gamma_to_child_keep(parent.keep, parent.gamma, child_keep)
+        node_kwargs.relaxation == :DDGFactplusUpsilon ?
+        parent_gamma_child :
+        nothing
+
+    child_calibration_params =
+        node_kwargs.calibration_params
+
+    if node_kwargs.relaxation == :DDGFactplusUpsilon &&
+        recalibrate_child &&
+        node_kwargs.warm_start &&
+        parent_gamma_child !== nothing
+
+        child_calibration_params = copy(node_kwargs.calibration_params)
+        child_calibration_params[:theta0] = log.(parent_gamma_child)
+    end
 
     child_kwargs = merge(
         node_kwargs,
         (
+            calibration_params = child_calibration_params,
             calibrate_upsilon = recalibrate_child,
             fixed_gamma = fixed_gamma_child,
         ),
@@ -397,7 +417,8 @@ Main options:
 
   - `relaxation = DDGFact`, `DDGFactplus`, or `DDGFactplusUpsilon`.
   - `fixing_rule = :none`, `:dual`, `:primal`, or `:both`.
-  - `calibration_method = :bfgs`, `:ppa_one`, or `:ppa_full` for DDGFactplusUpsilon.
+  - `calibration_method = :bfgs`, `:ppa_one`, `:ppa_full`,
+        `:pf_lmo_lmo`, `:pf_lmo_po`, or `:pf_po_lmo` for DDGFactplusUpsilon.
   - `root_calibration_params` controls root-node Upsilon calibration.
   - `node_calibration_params` controls all child and rebound node calibrations.
 
@@ -417,6 +438,7 @@ function solve_bnb_ddfact(
     node_calibration_params = Dict{Symbol,Any}(),
     upsilon_fixing::Symbol = :simple,
     recalibrate_k::Int = 1,
+    warm_start::Bool = false,
     atol::Float64 = 1e-8,
     psi_margin::Float64 = 1e-7,
     psi_floor::Float64 = 0.0,
@@ -455,8 +477,6 @@ function solve_bnb_ddfact(
         nfix1 = 0,
     ))
 
-    need_dual = fixing_rule in (:dual, :both)
-
     root_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
@@ -466,7 +486,7 @@ function solve_bnb_ddfact(
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
-        need_dual = need_dual,
+        warm_start = warm_start,
     )
 
     child_node_kwargs = _make_node_kwargs(
@@ -478,7 +498,7 @@ function solve_bnb_ddfact(
         psi_margin = psi_margin,
         psi_floor = psi_floor,
         upsilon_fixing = upsilon_fixing,
-        need_dual = need_dual,
+        warm_start = warm_start,
     )
 
     r_root = _gmesp_node(
@@ -654,11 +674,7 @@ function solve_bnb_ddfact(
 
     dual_solution_time = get(bnb_timing, :dual_solution_time, 0.0)
     variable_fixing_direct_time = get(bnb_timing, :variable_fixing_time, 0.0)
-
-    variable_fixing_total_time =
-        fixing_rule in (:dual, :both) ?
-        variable_fixing_direct_time + dual_solution_time :
-        variable_fixing_direct_time
+    variable_fixing_total_time = variable_fixing_direct_time
 
     stats = (
         nodes = cnt.nodes,
@@ -682,6 +698,7 @@ function solve_bnb_ddfact(
         root_calibration_params = root_calibration_params,
         node_calibration_params = node_calibration_params,
         recalibrate_k = recalibrate_k,
+        warm_start = warm_start,
 
         knitro_time = get(bnb_timing, :knitro_time, 0.0),
         relaxation_solve_time = get(bnb_timing, :relaxation_solve_time, 0.0),
