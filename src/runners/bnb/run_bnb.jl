@@ -224,7 +224,7 @@ mkpath("results")
 warm_tag = warm_start ? "warm" : "cold"
 
 results_filepath =
-    "results/bnb_data$(data_n)_n$(n)_s$(s)_t$(t)_po_lmo_adp_50.csv"
+    "results/bnb_data$(data_n)_n$(n)_s$(s)_t$(t)_po_lmo_greedy.csv"
 
 cols = [
     :data_n,

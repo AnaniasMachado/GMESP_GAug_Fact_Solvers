@@ -1,6 +1,7 @@
 using LinearAlgebra
 using JuMP
 using Gurobi
+using KNITRO
 import MathOptInterface as MOI
 
 # ============================================================
@@ -719,6 +720,336 @@ function solve_GTheta_upsilon_with_gurobi(
     )
 end
 
+
+function solve_GTheta_upsilon_with_greedy(
+    d::Vector{Float64},
+    gamma::Vector{Float64},
+    s::Int,
+    t::Int;
+    l::Vector{Float64} = zeros(length(d)),
+    c::Vector{Float64} = ones(length(d)),
+    atol::Float64 = 1e-8,
+    silent::Bool = true,
+)
+    n = length(d)
+
+    # ========================================================
+    # Input validation
+    # ========================================================
+
+    if length(gamma) != n || length(l) != n || length(c) != n
+        error("d, gamma, l, and c must have the same length.")
+    end
+
+    if any(gamma .<= 0.0)
+        error("All entries of gamma must be strictly positive.")
+    end
+
+    if any(l .> c .+ atol)
+        error("Bounds must satisfy l <= c.")
+    end
+
+    if any((l .!= 0.0) .& (l .!= 1.0)) ||
+       any((c .!= 0.0) .& (c .!= 1.0))
+        error("Bounds l and c must be binary vectors.")
+    end
+
+    if !(0 <= t <= s <= n)
+        error("Need 0 <= t <= s <= n.")
+    end
+
+    if sum(l) > s + atol || sum(c) < s - atol
+        error(
+            "The fixed-variable polytope is empty: " *
+            "need sum(l) <= s <= sum(c)."
+        )
+    end
+
+    q = log.(gamma)
+
+    # Fixed-selected, free, and fixed-zero indices.
+    fixed_one = findall(i -> l[i] == 1.0, 1:n)
+    free = findall(i -> l[i] == 0.0 && c[i] == 1.0, 1:n)
+    fixed_zero = findall(i -> c[i] == 0.0, 1:n)
+
+    num_fixed_one = length(fixed_one)
+    num_free = length(free)
+
+    # Number of free variables that must be selected.
+    r = s - num_fixed_one
+
+    if r < 0 || r > num_free
+        error(
+            "The fixed-variable polytope is empty: " *
+            "need 0 <= s - sum(l) <= number of free variables."
+        )
+    end
+
+    # ========================================================
+    # Objective after eliminating upsilon, nu, eta, rho, tau
+    #
+    # For a fixed alpha:
+    #
+    #   rho_i(alpha) = max(-q_i - alpha, 0)
+    #   m_i(alpha)   = d_i + rho_i(alpha)
+    #
+    # and
+    #
+    #   phi(alpha)
+    #       = alpha*t
+    #         + sum_{i in fixed_one} m_i(alpha)
+    #         + sum of the r largest free m_i(alpha).
+    # ========================================================
+
+    function evaluate_phi(alpha::Float64)
+        rho_alpha = max.(-q .- alpha, 0.0)
+        m_alpha = d + rho_alpha
+
+        value_alpha =
+            alpha * t +
+            sum(m_alpha[fixed_one]; init = 0.0)
+
+        if r > 0
+            free_values = m_alpha[free]
+
+            selected_positions =
+                partialsortperm(
+                    free_values,
+                    1:r;
+                    rev = true,
+                )
+
+            value_alpha +=
+                sum((free_values[j] for j in selected_positions); init = 0.0)
+        end
+
+        return value_alpha
+    end
+
+    # ========================================================
+    # Generate all relevant breakpoints.
+    #
+    # Each function
+    #
+    #   m_i(alpha) = d_i + max(-q_i-alpha, 0)
+    #
+    # has a kink at alpha = -q_i.
+    #
+    # For two free indices i and j, a decreasing piece of m_i
+    # can cross the constant piece of m_j at
+    #
+    #   alpha = d_i - q_i - d_j.
+    #
+    # This crossing is relevant only when
+    #
+    #   alpha <= -q_i
+    #   alpha >= -q_j.
+    # ========================================================
+
+    breakpoints = Float64[]
+
+    # Kinks matter for fixed-one and free indices.
+    for i in fixed_one
+        push!(breakpoints, -q[i])
+    end
+
+    for i in free
+        push!(breakpoints, -q[i])
+    end
+
+    # Relevant pairwise crossings among free indices.
+    for i in free
+        kink_i = -q[i]
+
+        for j in free
+            if i == j
+                continue
+            end
+
+            kink_j = -q[j]
+
+            alpha_cross =
+                d[i] - q[i] - d[j]
+
+            if alpha_cross <= kink_i + atol &&
+               alpha_cross >= kink_j - atol
+                push!(breakpoints, alpha_cross)
+            end
+        end
+    end
+
+    # There is always at least one active index unless s = t = 0
+    # and all variables are fixed to zero.
+    if isempty(breakpoints)
+        alpha_val = 0.0
+        best_phi = evaluate_phi(alpha_val)
+        unique_breakpoints = Float64[]
+    else
+        sort!(breakpoints)
+
+        # Numerically deduplicate breakpoints.
+        unique_breakpoints = Float64[]
+        push!(unique_breakpoints, breakpoints[1])
+
+        for alpha_val in breakpoints[2:end]
+            if abs(alpha_val - unique_breakpoints[end]) > atol
+                push!(unique_breakpoints, alpha_val)
+            end
+        end
+
+        # ====================================================
+        # Convex binary search over the sorted breakpoint list.
+        #
+        # Since phi is convex, its values over the ordered
+        # breakpoints form a unimodal sequence.
+        # ====================================================
+
+        lo = 1
+        hi = length(unique_breakpoints)
+
+        while lo < hi
+            mid = div(lo + hi, 2)
+
+            phi_mid = evaluate_phi(unique_breakpoints[mid])
+
+            phi_next = evaluate_phi(unique_breakpoints[mid + 1])
+
+            if phi_mid <= phi_next
+                hi = mid
+            else
+                lo = mid + 1
+            end
+        end
+
+        alpha_val = unique_breakpoints[lo]
+        best_phi = evaluate_phi(alpha_val)
+    end
+
+    # ========================================================
+    # Recover rho, eta, and m at the optimal alpha.
+    # ========================================================
+
+    rho_val = max.(-q .- alpha_val, 0.0)
+    eta_val = max.(q .+ alpha_val, 0.0)
+
+    m_val = d + rho_val
+
+    # ========================================================
+    # Recover an optimal tau.
+    #
+    # Among free indices, tau separates the r selected largest
+    # values from the remaining values.
+    # ========================================================
+
+    if num_free == 0
+        # Every x variable is fixed, so the objective is
+        # independent of tau.
+        tau_val = 0.0
+    else
+        free_m_sorted =
+            sort(
+                m_val[free];
+                rev = true,
+            )
+
+        if r == 0
+            # No free variable is selected.
+            tau_val = free_m_sorted[1]
+        elseif r == num_free
+            # Every free variable is selected.
+            tau_val = free_m_sorted[end]
+        else
+            upper_threshold =
+                free_m_sorted[r]
+
+            lower_threshold =
+                free_m_sorted[r + 1]
+
+            tau_val =
+                0.5 * (
+                    upper_threshold +
+                    lower_threshold
+                )
+        end
+    end
+
+    # ========================================================
+    # Recover upsilon and nu.
+    # ========================================================
+
+    upsilon_val = max.(tau_val .- m_val, 0.0)
+    nu_val = max.(m_val .- tau_val, 0.0)
+
+    # Clean tiny numerical values.
+    upsilon_val[abs.(upsilon_val) .<= atol] .= 0.0
+    nu_val[abs.(nu_val) .<= atol] .= 0.0
+    eta_val[abs.(eta_val) .<= atol] .= 0.0
+    rho_val[abs.(rho_val) .<= atol] .= 0.0
+
+    if abs(tau_val) <= atol
+        tau_val = 0.0
+    end
+
+    if abs(alpha_val) <= atol
+        alpha_val = 0.0
+    end
+
+    # ========================================================
+    # Residuals and objective value
+    # ========================================================
+
+    residual_x =
+        d +
+        upsilon_val -
+        nu_val +
+        rho_val .-
+        tau_val
+
+    residual_y =
+        -q +
+        eta_val -
+        rho_val .-
+        alpha_val
+
+    linear_value =
+        -dot(upsilon_val, l) +
+        dot(nu_val, c) +
+        tau_val * s +
+        alpha_val * t
+
+    # max_residual_x =
+    #     maximum(abs.(residual_x))
+
+    # max_residual_y =
+    #     maximum(abs.(residual_y))
+
+    # min_nonnegative_variable =
+    #     minimum(
+    #         vcat(
+    #             upsilon_val,
+    #             nu_val,
+    #             eta_val,
+    #             rho_val,
+    #         ),
+    #     )
+    
+    # max_residual_x > atol && error("x-dual equality residual too large: " * "$max_residual_x.")
+    # max_residual_y > atol && error("y-dual equality residual too large: " * "$max_residual_y.")
+    # max_residual_x < -atol && error("A constructed dual variable is negative: " * "$min_nonnegative_variable.")
+
+    return (
+        upsilon = upsilon_val,
+        nu = nu_val,
+        eta = eta_val,
+        rho = rho_val,
+        tau = tau_val,
+        alpha = alpha_val,
+        linear_value = linear_value,
+        objective_value = linear_value,
+    )
+end
+
+
 # ============================================================
 # Objective value of a feasible DGFact^+_Upsilon solution
 #
@@ -839,6 +1170,16 @@ function DGFactplusUpsilon_dual_solution_from_DDGFactplusUpsilon_xy(
         silent = silent,
     )
 
+    # sol_G = solve_GTheta_upsilon_with_knitro(
+    #     d,
+    #     gamma,
+    #     s,
+    #     t;
+    #     l = l,
+    #     c = c,
+    #     atol = atol,
+    # )
+
     obj = DGFactplusUpsilon_objective_value(
         Theta,
         sol_G.upsilon,
@@ -880,5 +1221,178 @@ function DGFactplusUpsilon_dual_solution_from_DDGFactplusUpsilon_xy(
         residual_y = sol_G.residual_y,
         primal_linear_value = primal_linear_value,
         Gtheta_status = sol_G.status,
+    )
+end
+
+
+# ============================================================
+# Solve G_Upsilon(Theta_hat)
+#
+# This version solves the one-dimensional convex problem directly:
+#
+#   min_alpha phi(alpha)
+#
+# where
+#
+#   phi(alpha) =
+#       alpha*t
+#     + sum_{i in L} m_i(alpha)
+#     + sum of the r largest values of {m_i(alpha): i in Ffree}
+#
+# and
+#
+#   m_i(alpha) = d_i + max(-q_i - alpha, 0).
+#
+# The Knitro model has only one decision variable: alpha.
+# After alpha is found, all dual variables are recovered in closed form.
+# ============================================================
+function solve_GTheta_upsilon_with_knitro(
+    d::Vector{Float64},
+    gamma::Vector{Float64},
+    s::Int,
+    t::Int;
+    l::Vector{Float64} = zeros(length(d)),
+    c::Vector{Float64} = ones(length(d)),
+    atol::Float64 = 1e-8,
+    silent::Bool = true,
+)
+    n = length(d)
+
+    if length(gamma) != n || length(l) != n || length(c) != n
+        error("d, gamma, l, and c must have the same length.")
+    end
+
+    if any(gamma .<= 0.0)
+        error("All entries of gamma must be strictly positive.")
+    end
+
+    if any(l .> c .+ atol)
+        error("Bounds must satisfy l <= c.")
+    end
+
+    if any((l .!= 0.0) .& (l .!= 1.0)) || any((c .!= 0.0) .& (c .!= 1.0))
+        error("Bounds l and c must be binary vectors.")
+    end
+
+    if sum(l) > s + atol || sum(c) < s - atol
+        error("The fixed-variable polytope is empty: need sum(l) <= s <= sum(c).")
+    end
+
+    q = log.(gamma)
+
+    L = findall(l .== 1.0)
+    F = findall((l .== 0.0) .& (c .== 1.0))
+    r = s - length(L)
+
+    if r < 0 || r > length(F)
+        error("Infeasible node: need 0 <= s - |L| <= |F|.")
+    end
+
+    model = Model(KNITRO.Optimizer)
+
+    if silent
+        set_silent(model)
+    end
+
+    @variable(model, alpha)
+    @variable(model, rho[1:n] >= 0.0)
+
+    @constraint(model, [i in 1:n], rho[i] >= -q[i] - alpha)
+
+    if r == 0
+        @objective(
+            model,
+            Min,
+            alpha * t +
+            sum((d[i] + rho[i] for i in L); init = 0.0)
+        )
+    elseif r == length(F)
+        @objective(
+            model,
+            Min,
+            alpha * t +
+            sum((d[i] + rho[i] for i in L); init = 0.0) +
+            sum((d[i] + rho[i] for i in F); init = 0.0)
+        )
+    else
+        @variable(model, tau_F)
+        @variable(model, nu_F[1:length(F)] >= 0.0)
+
+        @constraint(
+            model,
+            [j in 1:length(F)],
+            nu_F[j] >= d[F[j]] + rho[F[j]] - tau_F
+        )
+
+        @objective(
+            model,
+            Min,
+            alpha * t +
+            sum((d[i] + rho[i] for i in L); init = 0.0) +
+            r * tau_F +
+            sum(nu_F)
+        )
+    end
+
+    optimize!(model)
+
+    status = termination_status(model)
+
+    if !(status in (
+        MOI.OPTIMAL,
+        MOI.LOCALLY_SOLVED,
+        MOI.ALMOST_OPTIMAL,
+        MOI.ALMOST_LOCALLY_SOLVED,
+    ))
+        error("Reduced alpha problem was not solved to optimality. Status = $status.")
+    end
+
+    alpha_val = value(alpha)
+
+    rho_val = max.(-q .- alpha_val, 0.0)
+    eta_val = max.(q .+ alpha_val, 0.0)
+    m = d .+ rho_val
+
+    tau_val =
+        if isempty(F)
+            0.0
+        elseif r == 0
+            maximum(m[F])
+        elseif r == length(F)
+            minimum(m[F])
+        else
+            sorted_m = sort(m[F]; rev = true)
+            (sorted_m[r] + sorted_m[r + 1]) / 2
+        end
+
+    upsilon_val = max.(tau_val .- m, 0.0)
+    nu_val = max.(m .- tau_val, 0.0)
+
+    upsilon_val[abs.(upsilon_val) .<= atol] .= 0.0
+    nu_val[abs.(nu_val) .<= atol] .= 0.0
+    eta_val[abs.(eta_val) .<= atol] .= 0.0
+    rho_val[abs.(rho_val) .<= atol] .= 0.0
+
+    residual_x = d + upsilon_val - nu_val + rho_val .- tau_val
+    residual_y = -q + eta_val - rho_val .- alpha_val
+
+    linear_value =
+        -dot(upsilon_val, l) +
+        dot(nu_val, c) +
+        tau_val * s +
+        alpha_val * t
+
+    return (
+        upsilon = upsilon_val,
+        nu = nu_val,
+        eta = eta_val,
+        rho = rho_val,
+        tau = tau_val,
+        alpha = alpha_val,
+        linear_value = linear_value,
+        objective_value = objective_value(model),
+        residual_x = residual_x,
+        residual_y = residual_y,
+        status = status,
     )
 end

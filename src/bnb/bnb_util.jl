@@ -928,21 +928,57 @@ function _bound_ddgfactplus_upsilon_node(
 
     _add_bnb_timing!(:factorization_time, factorization_time)
 
-    local dual_sol
+        local dual_sol
 
     dual_time = @elapsed begin
-        dual_sol = DGFactplusUpsilon_dual_solution_from_DDGFactplusUpsilon_xy(
-            x,
-            gamma,
-            F,
-            s,
-            t,
-            psi_node;
-            yhat = y,
-            l = l,
-            c = c,
-            atol = atol,
-            silent = true,
+        theta_data =
+            construct_Theta_from_x_DDGFactplus(
+                x,
+                F,
+                t,
+                psi_node;
+                atol = atol,
+            )
+
+        Theta = theta_data.Theta
+
+        # d = diag(F * Theta * F')
+        d = vec(sum((F * Theta) .* F; dims = 2))
+
+        greedy_sol =
+            solve_GTheta_upsilon_with_greedy(
+                d,
+                gamma,
+                s,
+                t;
+                l = l,
+                c = c,
+                atol = atol,
+                silent = true,
+            )
+
+        dual_obj_data =
+            DGFactplusUpsilon_objective_value(
+                Theta,
+                greedy_sol.upsilon,
+                greedy_sol.nu,
+                greedy_sol.tau,
+                greedy_sol.alpha,
+                s,
+                t,
+                psi_node;
+                l = l,
+                c = c,
+                atol = atol,
+            )
+
+        dual_sol = merge(
+            greedy_sol,
+            (
+                Theta = Theta,
+                objective_value =
+                    dual_obj_data.objective_value,
+            ),
         )
     end
 
