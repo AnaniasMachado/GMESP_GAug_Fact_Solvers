@@ -294,6 +294,7 @@ ppa_full_param_sets = Dict(
 pf_lmo_lmo_param_sets = Dict(
     :root => Dict{Symbol,Any}(
         :algorithm => :lmo_lmo,
+        :lmo_q_solver => false,
 
         :max_iter => 500,
         :min_iter => 250,
@@ -323,9 +324,10 @@ pf_lmo_lmo_param_sets = Dict(
 
     :node => Dict{Symbol,Any}(
         :algorithm => :lmo_lmo,
+        :lmo_q_solver => false,
 
         :max_iter => 500,
-        :min_iter => 250,
+        :min_iter => 50,
         :iteration_power => 1.5,
 
         :theta_bound => 20.0,
@@ -363,6 +365,7 @@ pf_lmo_lmo_param_sets = Dict(
 pf_lmo_po_param_sets = Dict(
     :root => Dict{Symbol,Any}(
         :algorithm => :lmo_po,
+        :lmo_q_solver => false,
 
         :max_iter => 500,
         :min_iter => 250,
@@ -392,9 +395,10 @@ pf_lmo_po_param_sets = Dict(
 
     :node => Dict{Symbol,Any}(
         :algorithm => :lmo_po,
+        :lmo_q_solver => false,
 
         :max_iter => 500,
-        :min_iter => 250,
+        :min_iter => 50,
         :iteration_power => 1.5,
 
         :theta_bound => 20.0,
@@ -432,6 +436,7 @@ pf_lmo_po_param_sets = Dict(
 pf_po_lmo_param_sets = Dict(
     :root => Dict{Symbol,Any}(
         :algorithm => :po_lmo,
+        :lmo_q_solver => false,
 
         :max_iter => 500,
         :min_iter => 250,
@@ -461,6 +466,7 @@ pf_po_lmo_param_sets = Dict(
 
     :node => Dict{Symbol,Any}(
         :algorithm => :po_lmo,
+        :lmo_q_solver => false,
 
         :max_iter => 500,
         :min_iter => 50,

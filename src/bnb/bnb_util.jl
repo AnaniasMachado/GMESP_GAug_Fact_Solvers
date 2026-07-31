@@ -367,6 +367,7 @@ function _calibrate_upsilon_projection_free_from_params(
         s,
         t;
         algorithm = algorithm,
+        lmo_q_solver = get(param_set, :lmo_q_solver, false),
 
         J1 = J1,
         J0 = get(param_set, :J0, Int[]),
@@ -1244,40 +1245,35 @@ function _dual_variable_fixing(
             atol = Float64(tol),
         )
     else
+        dual_sol = r.dual_solution
+
         if r.upsilon_fixing == :strong
-            vf = var_fixing_DDGFactplusUpsilon_dual_strong(
-                r.x,
-                r.y,
-                r.gamma,
-                r.F,
+            return var_fixing_from_DGFactplusUpsilon_strong(
+                dual_sol.upsilon,
+                dual_sol.nu,
+                dual_sol.eta,
+                dual_sol.rho,
+                dual_sol.objective_value,
+                lb,
                 s,
-                t,
-                r.psi,
-                lb;
+                t;
                 l = r.l,
                 c = r.c,
                 atol = Float64(tol),
                 silent = true,
             )
-
-            return vf.fixing
         else
-            vf = var_fixing_DDGFactplusUpsilon_dual_simple(
-                r.x,
-                r.y,
-                r.gamma,
-                r.F,
-                s,
-                t,
-                r.psi,
+            return var_fixing_from_DGFactplusUpsilon_simple(
+                dual_sol.upsilon,
+                dual_sol.nu,
+                dual_sol.eta,
+                dual_sol.rho,
+                dual_sol.objective_value,
                 lb;
                 l = r.l,
                 c = r.c,
                 atol = Float64(tol),
-                silent = true,
             )
-
-            return vf.fixing
         end
     end
 end

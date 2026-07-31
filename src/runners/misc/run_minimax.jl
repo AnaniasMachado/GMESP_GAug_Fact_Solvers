@@ -149,6 +149,8 @@ pf_max_iter = 500
 pf_min_iter = 100
 pf_iteration_power = 1.5
 
+lmo_q_solver = false
+
 pf_theta_bound = 20.0
 
 pf_psi_derivative = true
@@ -179,7 +181,7 @@ pf_gurobi_output_flag = 0
 pf_gurobi_opttol = 1e-8
 pf_gurobi_feastol = 1e-8
 
-pf_diagnostics = true
+pf_diagnostics = false
 pf_verbose = false
 
 
@@ -187,7 +189,9 @@ pf_verbose = false
 # Data collection
 # ============================================================
 
-run_tag = "projection_free"
+lmo_q_solver_tag = lmo_q_solver ? "_solver" : "_dynamic"
+
+run_tag = "projection_free" * lmo_q_solver_tag
 
 mkpath("results")
 
@@ -626,6 +630,7 @@ for s in s_vals
                 _pf_common_kwargs(theta0_calib)...,
 
                 algorithm = :lmo_lmo,
+                lmo_q_solver = lmo_q_solver,
 
                 tau0 = pf_lmo_lmo_tau0,
                 tau_power = pf_lmo_lmo_tau_power,
@@ -684,6 +689,7 @@ for s in s_vals
                 _pf_common_kwargs(theta0_calib)...,
 
                 algorithm = :lmo_po,
+                lmo_q_solver = lmo_q_solver,
 
                 tau0 = pf_lmo_po_tau0,
                 tau_power = pf_lmo_po_tau_power,
@@ -742,6 +748,7 @@ for s in s_vals
                 _pf_common_kwargs(theta0_calib)...,
 
                 algorithm = :po_lmo,
+                lmo_q_solver = lmo_q_solver,
 
                 tau0 = pf_po_lmo_tau0,
                 tau_power = pf_po_lmo_tau_power,

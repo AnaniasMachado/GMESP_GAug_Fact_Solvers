@@ -201,6 +201,247 @@ end
 
 
 # ============================================================
+# Dynamic-programming LMO over q=(x,y)
+# ============================================================
+
+function _pf_lmo_q_dp!(
+    dx::AbstractVector{<:Real},
+    dy::AbstractVector{<:Real},
+    s::Int,
+    t::Int;
+    J1::AbstractVector{<:Integer} = Int[],
+    J0::AbstractVector{<:Integer} = Int[],
+)
+    n = length(dx)
+
+    length(dy) == n ||
+        throw(DimensionMismatch(
+            "dx and dy must have the same length."
+        ))
+
+    0 <= t <= s <= n ||
+        throw(ArgumentError(
+            "The cardinalities must satisfy 0 <= t <= s <= n."
+        ))
+
+    J1v = sort(unique(collect(Int, J1)))
+    J0v = sort(unique(collect(Int, J0)))
+
+    all(i -> 1 <= i <= n, J1v) ||
+        throw(ArgumentError("Every index in J1 must belong to 1:n."))
+
+    all(i -> 1 <= i <= n, J0v) ||
+        throw(ArgumentError("Every index in J0 must belong to 1:n."))
+
+    isempty(intersect(J1v, J0v)) ||
+        throw(ArgumentError("J1 and J0 must be disjoint."))
+
+    length(J1v) <= s ||
+        throw(ArgumentError(
+            "The constraint x[J1] = 1 is infeasible because length(J1) > s."
+        ))
+
+    n - length(J0v) >= s ||
+        throw(ArgumentError(
+            "The constraint x[J0] = 0 leaves fewer than s selectable indices."
+        ))
+
+    # State classification:
+    #
+    #   0 -> free index:
+    #        (0,0), (1,0), or (1,1)
+    #
+    #   1 -> J1 index:
+    #        (1,0) or (1,1)
+    #
+    #   2 -> J0 index:
+    #        only (0,0)
+    index_type = zeros(UInt8, n)
+
+    @inbounds for i in J1v
+        index_type[i] = 0x01
+    end
+
+    @inbounds for i in J0v
+        index_type[i] = 0x02
+    end
+
+    # Two rolling DP layers.
+    #
+    # Matrix entry [a+1,b+1] corresponds to cardinalities (a,b).
+    previous = fill(Inf, s + 1, t + 1)
+    current  = fill(Inf, s + 1, t + 1)
+
+    previous[1, 1] = 0.0
+
+    # Backtracking flags.
+    #
+    # For a reachable state after processing index i:
+    #
+    #   chose_x[i,a+1,b+1] = true
+    #       means x_i = 1
+    #
+    #   chose_y[i,a+1,b+1] = true
+    #       means y_i = 1
+    #
+    # Therefore:
+    #
+    #   false, false -> (0,0)
+    #   true,  false -> (1,0)
+    #   true,  true  -> (1,1)
+    #
+    # BitArray stores one bit per entry, substantially reducing
+    # backtracking memory relative to Array{UInt8,3}.
+    chose_x = falses(n, s + 1, t + 1)
+    chose_y = falses(n, s + 1, t + 1)
+
+    # Prefix counts used to restrict the set of states visited.
+    number_j1_processed = 0
+    number_j0_processed = 0
+
+    @inbounds for i in 1:n
+        fill!(current, Inf)
+
+        type_i = index_type[i]
+
+        if type_i == 0x01
+            number_j1_processed += 1
+        elseif type_i == 0x02
+            number_j0_processed += 1
+        end
+
+        # After processing i indices:
+        #
+        # - at least all processed J1 indices must have x=1;
+        # - at most all processed non-J0 indices can have x=1;
+        # - y cardinality cannot exceed x cardinality.
+        maximum_x_after =
+            min(s, i - number_j0_processed)
+
+        minimum_x_after =
+            min(s, number_j1_processed)
+
+        # Bounds for states before processing index i.
+        maximum_x_before =
+            min(s, (i - 1) - (number_j0_processed -
+                              (type_i == 0x02 ? 1 : 0)))
+
+        minimum_x_before =
+            min(s, number_j1_processed -
+                   (type_i == 0x01 ? 1 : 0))
+
+        for a in minimum_x_before:maximum_x_before
+            maximum_y_before = min(t, a)
+
+            for b in 0:maximum_y_before
+                old_value = previous[a + 1, b + 1]
+
+                isfinite(old_value) || continue
+
+                # ------------------------------------------------
+                # State (x_i,y_i) = (0,0)
+                #
+                # Allowed for free and J0 indices, but not J1.
+                # ------------------------------------------------
+                if type_i != 0x01
+                    if minimum_x_after <= a <= maximum_x_after &&
+                       old_value < current[a + 1, b + 1]
+
+                        current[a + 1, b + 1] = old_value
+
+                        chose_x[i, a + 1, b + 1] = false
+                        chose_y[i, a + 1, b + 1] = false
+                    end
+                end
+
+                # J0 permits no state with x_i=1.
+                type_i == 0x02 && continue
+
+                # ------------------------------------------------
+                # State (x_i,y_i) = (1,0)
+                # ------------------------------------------------
+                if a < s
+                    new_a = a + 1
+                    candidate = old_value + Float64(dx[i])
+
+                    if minimum_x_after <= new_a <= maximum_x_after &&
+                       candidate < current[new_a + 1, b + 1]
+
+                        current[new_a + 1, b + 1] = candidate
+
+                        chose_x[i, new_a + 1, b + 1] = true
+                        chose_y[i, new_a + 1, b + 1] = false
+                    end
+                end
+
+                # ------------------------------------------------
+                # State (x_i,y_i) = (1,1)
+                # ------------------------------------------------
+                if a < s && b < t
+                    new_a = a + 1
+                    new_b = b + 1
+
+                    candidate =
+                        old_value +
+                        Float64(dx[i]) +
+                        Float64(dy[i])
+
+                    if minimum_x_after <= new_a <= maximum_x_after &&
+                       candidate < current[new_a + 1, new_b + 1]
+
+                        current[new_a + 1, new_b + 1] = candidate
+
+                        chose_x[i, new_a + 1, new_b + 1] = true
+                        chose_y[i, new_a + 1, new_b + 1] = true
+                    end
+                end
+            end
+        end
+
+        previous, current = current, previous
+    end
+
+    optimal_value = previous[s + 1, t + 1]
+
+    isfinite(optimal_value) ||
+        error(
+            "The dynamic-programming q-LMO found no feasible solution."
+        )
+
+    # ------------------------------------------------------------
+    # Backtrack from cardinality state (s,t).
+    # ------------------------------------------------------------
+    x = zeros(Float64, n)
+    y = zeros(Float64, n)
+
+    a = s
+    b = t
+
+    @inbounds for i in n:-1:1
+        xi = chose_x[i, a + 1, b + 1]
+        yi = chose_y[i, a + 1, b + 1]
+
+        if xi
+            x[i] = 1.0
+            a -= 1
+        end
+
+        if yi
+            y[i] = 1.0
+            b -= 1
+        end
+    end
+
+    a == 0 && b == 0 ||
+        error(
+            "Internal error while backtracking the dynamic-programming q-LMO."
+        )
+
+    return x, y
+end
+
+
+# ============================================================
 # Reusable projection model over q=(x,y)
 #
 # Solves:
@@ -495,6 +736,7 @@ function calibrate_upsilon_projection_free_ddfactplus(
     s::Int,
     t::Int;
     algorithm::Symbol = :po_lmo,
+    lmo_q_solver::Bool = true,
 
     J1::AbstractVector{<:Integer} = Int[],
     J0::AbstractVector{<:Integer} = Int[],
@@ -573,27 +815,31 @@ function calibrate_upsilon_projection_free_ddfactplus(
     x_ref = copy(x)
     y_ref = copy(y)
 
-    q_lmo = _pf_build_q_lmo_model(
-        n,
-        s,
-        t;
-        J1 = J1v,
-        J0 = J0v,
-        gurobi_output_flag = gurobi_output_flag,
-        gurobi_opttol = gurobi_opttol,
-        gurobi_feastol = gurobi_feastol,
-    )
+    q_lmo = algorithm == :lmo_lmo || (algorithm == :po_lmo && lmo_q_solver) ?
+        _pf_build_q_lmo_model(
+            n,
+            s,
+            t;
+            J1 = J1v,
+            J0 = J0v,
+            gurobi_output_flag = gurobi_output_flag,
+            gurobi_opttol = gurobi_opttol,
+            gurobi_feastol = gurobi_feastol,
+        ) :
+        nothing
 
-    q_proj = _pf_build_q_projection_model(
-        n,
-        s,
-        t;
-        J1 = J1v,
-        J0 = J0v,
-        gurobi_output_flag = gurobi_output_flag,
-        gurobi_opttol = gurobi_opttol,
-        gurobi_feastol = gurobi_feastol,
-    )
+    q_proj = algorithm == :lmo_po ?
+        _pf_build_q_projection_model(
+            n,
+            s,
+            t;
+            J1 = J1v,
+            J0 = J0v,
+            gurobi_output_flag = gurobi_output_flag,
+            gurobi_opttol = gurobi_opttol,
+            gurobi_feastol = gurobi_feastol,
+        ) :
+        nothing
 
     history = NamedTuple[]
 
@@ -669,11 +915,22 @@ function calibrate_upsilon_projection_free_ddfactplus(
             theta_new =
                 theta .+ tau .* (vtheta .- theta)
 
-            ux, uy = _pf_lmo_q!(
-                q_lmo,
-                -gx_beta,
-                -gy_beta,
-            )
+            if lmo_q_solver
+                ux, uy = _pf_lmo_q!(
+                    q_lmo,
+                    -gx_beta,
+                    -gy_beta,
+                )
+            else
+                ux, uy = _pf_lmo_q_dp!(
+                    -gx_beta,
+                    -gy_beta,
+                    s,
+                    t;
+                    J1 = J1v,
+                    J0 = J0v,
+                )
+            end
 
             qdiff_norm_sq =
                 norm(ux .- x)^2 + norm(uy .- y)^2
@@ -714,11 +971,22 @@ function calibrate_upsilon_projection_free_ddfactplus(
                     theta_bound,
                 )
 
-            ux, uy = _pf_lmo_q!(
-                q_lmo,
-                -gx_beta,
-                -gy_beta,
-            )
+            if lmo_q_solver
+                ux, uy = _pf_lmo_q!(
+                    q_lmo,
+                    -gx_beta,
+                    -gy_beta,
+                )
+            else
+                ux, uy = _pf_lmo_q_dp!(
+                    -gx_beta,
+                    -gy_beta,
+                    s,
+                    t;
+                    J1 = J1v,
+                    J0 = J0v,
+                )
+            end
 
             qdiff_norm_sq =
                 norm(ux .- x)^2 + norm(uy .- y)^2
