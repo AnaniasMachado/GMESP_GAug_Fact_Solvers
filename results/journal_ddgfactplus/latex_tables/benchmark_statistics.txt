@@ -1,0 +1,13 @@
+\begin{table}[htbp]
+\centering
+\begin{tabular}{crrrr}
+\hline
+$n$ & $\lambda_{\min}(C)$ & $\lambda_{\max}(C)$ & $\operatorname{mean}(\lambda(C))$ & $\kappa_2(C)$ \\
+\hline
+63 & 3.174564e-02 & 1.537209e+00 & 1.269984e-01 & 4.842267e+01 \\
+90 & 1.898882e+01 & 3.806307e+03 & 2.254244e+02 & 2.004499e+02 \\
+\hline
+\end{tabular}
+\caption{Spectral statistics of the covariance matrices.}
+\label{tab:matrix_statistics}
+\end{table}

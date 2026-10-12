@@ -89,6 +89,8 @@ end
 function _make_node_kwargs(;
     relaxation,
     psi,
+    plus_cf,
+    psi_trace,
     calibration_method,
     calibration_params,
     atol,
@@ -100,6 +102,8 @@ function _make_node_kwargs(;
     return (
         relaxation = relaxation,
         psi = psi,
+        plus_cf = plus_cf,
+        psi_trace = psi_trace,
         calibration_method = calibration_method,
         calibration_params = calibration_params,
         atol = atol,
@@ -154,6 +158,16 @@ function _bound_child!(
     recalibrate_k::Int,
 )
     child_depth = parent.depth + 1
+
+    if node_kwargs.relaxation == :DDGFactplus
+        psi_trace = node_kwargs.psi_trace
+        ub_trace = trace_upper_bound(C, s, t, psi_trace; F1, F0)
+
+        if ub_trace <= state[].lb
+            _add_bnb_timing!(:trace_prunes, 1.0)
+            return nothing
+        end
+    end
 
     child_keep = setdiff(1:size(C, 1), F0)
 
@@ -244,6 +258,16 @@ function _bound_child!(
             nfix0 = cnt.nfix0 + length(F0f) - length(F0),
             nfix1 = cnt.nfix1 + length(F1f) - length(F1),
         )
+
+        if node_kwargs.relaxation == :DDGFactplus
+            psi_trace = node_kwargs.psi_trace
+            ub_trace = trace_upper_bound(C, s, t, psi_trace; F1 = F1f, F0 = F0f)
+
+            if ub_trace <= state[].lb
+                _add_bnb_timing!(:trace_prunes, 1.0)
+                return nothing
+            end
+        end
 
         # Refit after variable fixing, but do not recalibrate again.
         refit_keep = setdiff(1:size(C, 1), F0f)
@@ -431,6 +455,7 @@ function solve_bnb_ddfact(
     relaxation = DDGFact,
     fixing_rule::Symbol = :dual,
     psi::Union{Nothing,Float64} = nothing,
+    plus_cf::Bool = false,
     time_limit::Real = 3600.0,
     verbose::Bool = true,
     calibration_method::Symbol = :bfgs,
@@ -477,9 +502,13 @@ function solve_bnb_ddfact(
         nfix1 = 0,
     ))
 
+    psi_trace = relaxation == :DDGFactplus ? (psi === nothing ? _default_psi(C; psi_margin, psi_floor) : psi) : nothing
+
     root_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
+        plus_cf = plus_cf,
+        psi_trace = psi_trace,
         calibration_method = calibration_method,
         calibration_params = root_calibration_params,
         atol = atol,
@@ -492,6 +521,8 @@ function solve_bnb_ddfact(
     child_node_kwargs = _make_node_kwargs(
         relaxation = relaxation,
         psi = psi,
+        plus_cf = plus_cf,
+        psi_trace = psi_trace,
         calibration_method = calibration_method,
         calibration_params = node_calibration_params,
         atol = atol,
@@ -533,7 +564,7 @@ function solve_bnb_ddfact(
 
     open = BinaryMaxHeap{GMESPNode}()
 
-    if !(r_root.determined || r_root.ub ≤ st.lb)
+    if !(r_root.determined || ub_root <= st.lb)
         push!(
             open,
             GMESPNode(
@@ -576,7 +607,8 @@ function solve_bnb_ddfact(
 
         node === nothing && break
 
-        i = _branch_var(node.keep, node.x, node.F1)
+        # i = _branch_var(node.keep, node.x, node.F1)
+        i = _branch_var(C, node.keep, node.x, node.F1, relaxation)
         i == 0 && continue
 
         F1_child = copy(node.F1)
@@ -699,6 +731,13 @@ function solve_bnb_ddfact(
         node_calibration_params = node_calibration_params,
         recalibrate_k = recalibrate_k,
         warm_start = warm_start,
+
+        plus_cf = plus_cf,
+        closed_form_uses =
+            Int(round(get(bnb_timing, :closed_form_uses, 0.0))),
+        closed_form_time =
+            get(bnb_timing, :closed_form_time, 0.0),
+        trace_prunes = Int(round(get(bnb_timing, :trace_prunes, 0.0))),
 
         knitro_time = get(bnb_timing, :knitro_time, 0.0),
         relaxation_solve_time = get(bnb_timing, :relaxation_solve_time, 0.0),

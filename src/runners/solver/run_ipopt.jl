@@ -33,15 +33,6 @@ atol = 1e-10
 psi = eigmin(Csym) - atol
 
 # -------------------------
-# Calibration parameters
-# -------------------------
-max_calib_iter = 50
-alpha0 = 1e-3
-rho = 1e4
-margin = 1e-5
-tau = 1e-5
-
-# -------------------------
 # Data Collection
 # -------------------------
 solver = "ipopt"

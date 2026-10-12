@@ -1,4 +1,5 @@
 using LinearAlgebra
+using DataStructures
 using JuMP
 using Gurobi
 
@@ -440,6 +441,149 @@ function _pf_lmo_q_dp!(
     return x, y
 end
 
+# ============================================================
+# Cut-sort LMO over q=(x,y)
+# ============================================================
+
+function _pf_lmo_q_sort!(
+    dx::AbstractVector{<:Real},
+    dy::AbstractVector{<:Real},
+    s::Int,
+    t::Int;
+    J1::AbstractVector{<:Integer}=Int[],
+    J0::AbstractVector{<:Integer}=Int[]
+)
+    n = length(dx)
+    length(dy) == n || throw(DimensionMismatch("dx and dy must have the same length."))
+    0 <= t <= s <= n || throw(ArgumentError("Require 0 <= t <= s <= n."))
+
+    J1 = unique(Int.(J1))
+    J0 = unique(Int.(J0))
+    all(i -> 1 <= i <= n, J1) || throw(ArgumentError("J1 contains an invalid index."))
+    all(i -> 1 <= i <= n, J0) || throw(ArgumentError("J0 contains an invalid index."))
+    isempty(intersect(J1, J0)) || throw(ArgumentError("J1 and J0 must be disjoint."))
+    length(J1) <= s || throw(ArgumentError("Too many indices fixed to one."))
+    n - length(J0) >= s || throw(ArgumentError("Too many indices fixed to zero."))
+
+    fixed1 = falses(n)
+    fixed0 = falses(n)
+    fixed1[J1] .= true
+    fixed0[J0] .= true
+
+    order = sortperm(dy)
+    prefix = fill(Inf, n + 1)
+    suffix = fill(Inf, n + 1)
+
+    heap = BinaryMaxHeap{Float64}()
+    heap_sum = 0.0
+    forced_sum = 0.0
+    forced_count = 0
+    free_count = 0
+
+    prefix[1] = t == 0 ? 0.0 : Inf
+
+    for k in 1:n
+        i = order[k]
+        cost = Float64(dx[i] + dy[i])
+
+        if fixed1[i]
+            forced_count += 1
+            forced_sum += cost
+        elseif !fixed0[i]
+            free_count += 1
+            push!(heap, cost)
+            heap_sum += cost
+        end
+
+        need = t - forced_count
+
+        while need >= 0 && length(heap) > need
+            heap_sum -= pop!(heap)
+        end
+
+        if need >= 0 && free_count >= need
+            prefix[k + 1] = forced_sum + heap_sum
+        end
+    end
+
+    heap = BinaryMaxHeap{Float64}()
+    heap_sum = 0.0
+    forced_sum = 0.0
+    forced_count = 0
+    free_count = 0
+    r = s - t
+
+    suffix[n + 1] = r == 0 ? 0.0 : Inf
+
+    for k in n:-1:1
+        i = order[k]
+        cost = Float64(dx[i])
+
+        if fixed1[i]
+            forced_count += 1
+            forced_sum += cost
+        elseif !fixed0[i]
+            free_count += 1
+            push!(heap, cost)
+            heap_sum += cost
+        end
+
+        need = r - forced_count
+
+        while need >= 0 && length(heap) > need
+            heap_sum -= pop!(heap)
+        end
+
+        if need >= 0 && free_count >= need
+            suffix[k] = forced_sum + heap_sum
+        end
+    end
+
+    best_value = Inf
+    best_cut = -1
+
+    for k in 0:n
+        value = prefix[k + 1] + suffix[k + 1]
+        if value < best_value
+            best_value = value
+            best_cut = k
+        end
+    end
+
+    best_cut >= 0 || throw(ArgumentError("The forced indices make the problem infeasible."))
+
+    x = zeros(Float64, n)
+    y = zeros(Float64, n)
+
+    left = order[1:best_cut]
+    right = order[(best_cut + 1):n]
+
+    left_forced = [i for i in left if fixed1[i]]
+    left_free = [i for i in left if !fixed1[i] && !fixed0[i]]
+    left_need = t - length(left_forced)
+
+    left_selected = copy(left_forced)
+    if left_need > 0
+        p = sortperm(left_free, by=i -> dx[i] + dy[i])
+        append!(left_selected, left_free[p[1:left_need]])
+    end
+
+    right_forced = [i for i in right if fixed1[i]]
+    right_free = [i for i in right if !fixed1[i] && !fixed0[i]]
+    right_need = s - t - length(right_forced)
+
+    right_selected = copy(right_forced)
+    if right_need > 0
+        p = sortperm(right_free, by=i -> dx[i])
+        append!(right_selected, right_free[p[1:right_need]])
+    end
+
+    x[left_selected] .= 1.0
+    y[left_selected] .= 1.0
+    x[right_selected] .= 1.0
+
+    return x, y
+end
 
 # ============================================================
 # Reusable projection model over q=(x,y)
@@ -527,6 +671,39 @@ function _pf_project_q!(
 
     return Vector{Float64}(value.(oracle.x)),
            Vector{Float64}(value.(oracle.y))
+end
+
+
+function _pf_lmo_q_dispatch!(
+    method::Symbol,
+    q_lmo,
+    dx,
+    dy,
+    s::Int,
+    t::Int;
+    J1 = Int[],
+    J0 = Int[],
+)
+    if method == :solver
+        return _pf_lmo_q!(q_lmo, dx, dy)
+    elseif method == :dp
+        return _pf_lmo_q_dp!(
+            dx, dy, s, t;
+            J1 = J1,
+            J0 = J0,
+        )
+    elseif method == :sort
+        return _pf_lmo_q_sort!(
+            dx, dy, s, t;
+            J1 = J1,
+            J0 = J0,
+        )
+    else
+        throw(ArgumentError(
+            "Unknown q-LMO method: $(method). " *
+            "Use :solver, :dp, or :sort."
+        ))
+    end
 end
 
 
@@ -736,7 +913,7 @@ function calibrate_upsilon_projection_free_ddfactplus(
     s::Int,
     t::Int;
     algorithm::Symbol = :po_lmo,
-    lmo_q_solver::Bool = true,
+    lmo_q_method::Symbol = :solver,
 
     J1::AbstractVector{<:Integer} = Int[],
     J0::AbstractVector{<:Integer} = Int[],
@@ -777,6 +954,11 @@ function calibrate_upsilon_projection_free_ddfactplus(
 )
     n = size(C, 1)
 
+    lmo_q_method in (:solver, :dp, :sort) ||
+        throw(ArgumentError(
+            "lmo_q_method must be :solver, :dp, or :sort."
+        ))
+
     J1v = sort(unique(collect(Int, J1)))
     J0v = sort(unique(collect(Int, J0)))
 
@@ -815,7 +997,9 @@ function calibrate_upsilon_projection_free_ddfactplus(
     x_ref = copy(x)
     y_ref = copy(y)
 
-    q_lmo = algorithm == :lmo_lmo || (algorithm == :po_lmo && lmo_q_solver) ?
+    q_lmo =
+        lmo_q_method == :solver &&
+        (algorithm == :lmo_lmo || algorithm == :po_lmo) ?
         _pf_build_q_lmo_model(
             n,
             s,
@@ -909,20 +1093,46 @@ function calibrate_upsilon_projection_free_ddfactplus(
             end
         end
 
+        if diagnostics
+            theta_operator_runtime = 0.0
+            q_operator_runtime = 0.0
+        end
+
         if algorithm == :lmo_lmo
-            vtheta = _pf_lmo_theta_box(grads.gtheta, theta_bound)
+            if diagnostics
+                theta_operator_runtime = @elapsed begin
+                    vtheta = _pf_lmo_theta_box(
+                        grads.gtheta,
+                        theta_bound,
+                    )
+                end
+            else
+                vtheta = _pf_lmo_theta_box(
+                    grads.gtheta,
+                    theta_bound,
+                )
+            end
 
             theta_new =
                 theta .+ tau .* (vtheta .- theta)
 
-            if lmo_q_solver
-                ux, uy = _pf_lmo_q!(
-                    q_lmo,
-                    -gx_beta,
-                    -gy_beta,
-                )
+            if diagnostics
+                q_operator_runtime = @elapsed begin
+                    ux, uy = _pf_lmo_q_dispatch!(
+                        lmo_q_method,
+                        q_lmo,
+                        -gx_beta,
+                        -gy_beta,
+                        s,
+                        t;
+                        J1 = J1v,
+                        J0 = J0v,
+                    )
+                end
             else
-                ux, uy = _pf_lmo_q_dp!(
+                ux, uy = _pf_lmo_q_dispatch!(
+                    lmo_q_method,
+                    q_lmo,
                     -gx_beta,
                     -gy_beta,
                     s,
@@ -951,34 +1161,75 @@ function calibrate_upsilon_projection_free_ddfactplus(
             y_new = y .+ gamma_step .* (uy .- y)
 
         elseif algorithm == :lmo_po
-            vtheta = _pf_lmo_theta_box(grads.gtheta, theta_bound)
+            if diagnostics
+                theta_operator_runtime = @elapsed begin
+                    vtheta = _pf_lmo_theta_box(
+                        grads.gtheta,
+                        theta_bound,
+                    )
+                end
+            else
+                vtheta = _pf_lmo_theta_box(
+                    grads.gtheta,
+                    theta_bound,
+                )
+            end
 
             theta_new =
                 theta .+ tau .* (vtheta .- theta)
 
             gamma_step = 1.0 / (Lqq_hat + beta)
 
-            x_new, y_new = _pf_project_q!(
-                q_proj,
-                x .+ gamma_step .* gx_beta,
-                y .+ gamma_step .* gy_beta,
-            )
+            if diagnostics
+                q_operator_runtime = @elapsed begin
+                    x_new, y_new = _pf_project_q!(
+                        q_proj,
+                        x .+ gamma_step .* gx_beta,
+                        y .+ gamma_step .* gy_beta,
+                    )
+                end
+            else
+                x_new, y_new = _pf_project_q!(
+                    q_proj,
+                    x .+ gamma_step .* gx_beta,
+                    y .+ gamma_step .* gy_beta,
+                )
+            end
 
         elseif algorithm == :po_lmo
-            theta_new =
-                _pf_project_theta_box(
-                    theta .- tau .* grads.gtheta,
-                    theta_bound,
-                )
-
-            if lmo_q_solver
-                ux, uy = _pf_lmo_q!(
-                    q_lmo,
-                    -gx_beta,
-                    -gy_beta,
-                )
+            if diagnostics
+                theta_operator_runtime = @elapsed begin
+                    theta_new =
+                        _pf_project_theta_box(
+                            theta .- tau .* grads.gtheta,
+                            theta_bound,
+                        )
+                end
             else
-                ux, uy = _pf_lmo_q_dp!(
+                theta_new =
+                    _pf_project_theta_box(
+                        theta .- tau .* grads.gtheta,
+                        theta_bound,
+                    )
+            end
+
+            if diagnostics
+                q_operator_runtime = @elapsed begin
+                    ux, uy = _pf_lmo_q_dispatch!(
+                        lmo_q_method,
+                        q_lmo,
+                        -gx_beta,
+                        -gy_beta,
+                        s,
+                        t;
+                        J1 = J1v,
+                        J0 = J0v,
+                    )
+                end
+            else
+                ux, uy = _pf_lmo_q_dispatch!(
+                    lmo_q_method,
+                    q_lmo,
                     -gx_beta,
                     -gy_beta,
                     s,
@@ -1016,9 +1267,13 @@ function calibrate_upsilon_projection_free_ddfactplus(
             push!(history, (
                 iter = k + 1,
                 algorithm = algorithm,
+                lmo_q_method = lmo_q_method,
                 tau = tau,
                 beta = beta,
                 gamma_step = gamma_step,
+
+                theta_operator_runtime = theta_operator_runtime,
+                q_operator_runtime = q_operator_runtime,
 
                 psi = state_val.psi,
                 lambda_min = state_val.lambda_min,

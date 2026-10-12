@@ -149,12 +149,49 @@ function _is_integer_point(x::AbstractVector)
 end
 
 
-function _branch_var(
-    keep::Vector{Int},
-    x::Vector{Float64},
-    F1::Vector{Int},
-)
+# function _branch_var(
+#     keep::Vector{Int},
+#     x::Vector{Float64},
+#     F1::Vector{Int},
+# )
+#     F1set = Set(F1)
+#     best_k = 0
+#     best_f = -1.0
+
+#     for k in eachindex(keep)
+#         keep[k] in F1set && continue
+
+#         f = min(x[k], 1.0 - x[k])
+
+#         if f > best_f
+#             best_f = f
+#             best_k = k
+#         end
+#     end
+
+#     return best_k == 0 ? 0 : keep[best_k]
+# end
+
+
+function _branch_var(C::Symmetric, keep::Vector{Int}, x::Vector{Float64}, F1::Vector{Int}, relaxation::Symbol)
     F1set = Set(F1)
+
+    if relaxation == :DDGFactplus && _is_integer_point(x)
+        best_i = 0
+        best_d = -Inf
+
+        for i in keep
+            i in F1set && continue
+
+            if C[i, i] > best_d
+                best_d = C[i, i]
+                best_i = i
+            end
+        end
+
+        return best_i
+    end
+
     best_k = 0
     best_f = -1.0
 
@@ -222,6 +259,9 @@ function _reset_bnb_timing!()
     BNB_TIMING[:open_list_time] = 0.0
     BNB_TIMING[:node_setup_time] = 0.0
     BNB_TIMING[:bound_computation_time] = 0.0
+    BNB_TIMING[:closed_form_time] = 0.0
+    BNB_TIMING[:closed_form_uses] = 0.0
+    BNB_TIMING[:trace_prunes] = 0.0
 
     return nothing
 end
@@ -997,6 +1037,8 @@ function _gmesp_node(
     F0::Vector{Int};
     relaxation = DDGFact,
     psi::Union{Nothing,Float64} = nothing,
+    plus_cf::Bool = false,
+    psi_trace::Union{Nothing,Float64} = nothing,
     calibration_method::Symbol = :bfgs,
     calibration_params = Dict{Symbol,Any}(),
     atol::Float64 = 1e-8,
@@ -1083,6 +1125,93 @@ function _gmesp_node(
 
     _add_bnb_timing!(:node_setup_time, setup_time)
 
+    if plus_cf && relaxation == :DDGFactplus
+        local psi_node
+        local cf_valid
+        local x_cf
+        local S_cf
+
+        psi_time = @elapsed begin
+            psi_node =
+                psi === nothing ?
+                _default_psi(Ck; psi_margin = psi_margin, psi_floor = psi_floor) :
+                psi
+        end
+
+        _add_bnb_timing!(:node_setup_time, psi_time)
+
+        cf_time = @elapsed begin
+            cf_valid, x_cf, S_cf =
+                closed_form_general(
+                    Ck,
+                    s,
+                    t,
+                    psi_node;
+                    J1 = fix1,
+                    atol = atol,
+                )
+        end
+
+        _add_bnb_timing!(:closed_form_time, cf_time)
+
+        if cf_valid
+            local F
+            local dual_sol
+
+            primal_obj = DDGFactplus_value_at_x(
+                x_cf,
+                Ck,
+                t,
+                psi_node;
+                atol = atol,
+            )
+
+            factorization_time = @elapsed begin
+                F = factorize_matrix(
+                    Ck;
+                    psi = psi_node,
+                    atol = atol,
+                )
+            end
+
+            _add_bnb_timing!(:factorization_time, factorization_time)
+
+            dual_time = @elapsed begin
+                dual_sol = DGFactplus_dual_solution_from_DDGFactplus_x(
+                    x_cf,
+                    F,
+                    s,
+                    t,
+                    psi_node;
+                    l = l,
+                    c = c,
+                    atol = atol,
+                )
+            end
+
+            _add_bnb_timing!(:dual_solution_time, dual_time)
+            _add_bnb_timing!(:closed_form_uses, 1.0)
+
+            return (
+                ub = dual_sol.objective_value,
+                x = x_cf,
+                y = Float64[],
+                keep = keep,
+                determined = false,
+                relaxation = relaxation,
+                dual_solution = dual_sol,
+                l = l,
+                c = c,
+                gamma = nothing,
+                psi = psi_node,
+                F = F,
+                primal_obj = primal_obj,
+                upsilon_fixing = upsilon_fixing,
+                closed_form = true,
+            )
+        end
+    end
+
     if relaxation == :DDGFact
         local x
         local primal_obj
@@ -1160,6 +1289,7 @@ function _gmesp_node(
             F = F,
             primal_obj = primal_obj,
             upsilon_fixing = upsilon_fixing,
+            closed_form = false,
         )
     else
         local x

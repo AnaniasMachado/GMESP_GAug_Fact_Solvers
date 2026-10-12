@@ -396,6 +396,70 @@ function closed_form_t1(
     return closed_form_t1_from_F(F, s)
 end
 
+function closed_form_general(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    s::Int,
+    t::Int,
+    psi::Float64;
+    J1::AbstractVector{<:Integer} = Int[],
+    J0::AbstractVector{<:Integer} = Int[],
+    atol::Float64 = 1e-10,
+)
+    n = size(C, 1)
+
+    1 <= t <= s <= n || error("Need 1 <= t <= s <= n.")
+
+    J1 = sort(unique(collect(J1)))
+    J0 = sort(unique(collect(J0)))
+
+    isempty(intersect(J1, J0)) || error("J1 and J0 must be disjoint.")
+    length(J1) <= s || error("Too many variables fixed at one.")
+
+    Jfree = setdiff(1:n, union(J1, J0))
+    m = s - length(J1)
+
+    m <= length(Jfree) ||
+        error("Not enough free variables to satisfy cardinality s.")
+
+    diagonal_C = diag(C)
+
+    selected_free =
+        m == 0 ? Int[] :
+        Jfree[partialsortperm(diagonal_C[Jfree], 1:m; rev = true)]
+
+    S_star = sort(vcat(J1, selected_free))
+
+    x = zeros(Float64, n)
+    x[S_star] .= 1.0
+
+    Cpsi_S = Symmetric(
+        Matrix(C)[S_star, S_star] - psi * I
+    )
+
+    λmax = eigmax(Cpsi_S)
+
+    λsum = sum(diagonal_C[S_star]) - s * psi
+
+    valid = λsum >= t * λmax - atol
+
+    return valid, x, S_star
+end
+
+function trace_upper_bound(C::Symmetric{<:Real,<:AbstractMatrix}, s::Int, t::Int, psi::Float64; F1::Vector{Int} = Int[], F0::Vector{Int} = Int[])
+    n = size(C, 1)
+    Jfree = setdiff(1:n, union(F1, F0))
+    m = s - length(F1)
+
+    0 <= m <= length(Jfree) || return -Inf
+
+    diagonal_C = diag(C)
+    selected_free = m == 0 ? Int[] : Jfree[partialsortperm(diagonal_C[Jfree], 1:m; rev = true)]
+    S_star = vcat(F1, selected_free)
+
+    trM = sum(diagonal_C[S_star]) - s * psi
+    return t * log(trM / t + psi)
+end
+
 # ============================================================
 # Spectral subgradient of Gamma_t at M
 # ============================================================
@@ -461,4 +525,71 @@ function x_subgradient_Gamma_t(
 )
     F = compute_F(C; psi = psi)
     return x_subgradient_Gamma_t_from_F(x, F, t, psi; atol = atol)
+end
+
+# ============================================================
+# Largest psi admitting the general-t closed-form certificate
+# ============================================================
+function largest_closed_form_certificate_psi(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    s::Int,
+    t::Int;
+    J1::AbstractVector{<:Integer} = Int[],
+    J0::AbstractVector{<:Integer} = Int[],
+    atol::Float64 = 1e-10,
+)
+    n = size(C, 1)
+
+    1 <= t <= s <= n || error("Need 1 <= t <= s <= n.")
+
+    J1 = unique(collect(J1))
+    J0 = unique(collect(J0))
+
+    isempty(intersect(J1, J0)) || error("J1 and J0 must be disjoint.")
+    length(J1) <= s || error("Too many variables fixed at one.")
+
+    Jfree = setdiff(1:n, union(J1, J0))
+    number_to_select = s - length(J1)
+
+    number_to_select <= length(Jfree) ||
+        error("Not enough free variables to satisfy cardinality s.")
+
+    diagonal_C = diag(C)
+
+    selected_free =
+        number_to_select == 0 ? Int[] :
+        Jfree[
+            partialsortperm(
+                diagonal_C[Jfree],
+                1:number_to_select;
+                rev = true,
+            )
+        ]
+
+    S_star = sort(vcat(J1, selected_free))
+
+    x = zeros(Float64, n)
+    x[S_star] .= 1.0
+
+    λ = sort(
+        eigvals(Symmetric(Matrix(C)[S_star, S_star]));
+        rev = true,
+    )
+
+    certificate_margin =
+        sum(@view λ[2:end]) -
+        (t - 1) * λ[1]
+
+    if certificate_margin < -atol
+        return false, NaN, x, S_star
+    end
+
+    λmin_C = max(0.0, eigmin(C))
+
+    psi =
+        s == t ?
+        λmin_C :
+        min(λmin_C, max(0.0, certificate_margin / (s - t)))
+
+    return true, psi, x, S_star
 end

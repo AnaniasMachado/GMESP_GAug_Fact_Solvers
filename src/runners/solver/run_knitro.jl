@@ -8,17 +8,17 @@ using Ipopt
 using KNITRO
 import MathOptInterface as MOI
 
-include("./misc/util.jl")
-include("./misc/heuristics.jl")
-include("./solvers/solver_knitro.jl")
+include("../../misc/util.jl")
+include("../../misc/heuristics.jl")
+include("../../solvers/solver_knitro.jl")
 
 
 # -------------------------
 # Problem data
 # -------------------------
-n = 63
-kappa = 5
-s_vals = [s for s in (kappa + 1):(n-2)]
+n = 90
+kappa = 2
+s_vals = [s for s in 10:(n-1)]
 
 matfile = matopen("data/data$n.mat")
 C = n == 63 ? read(matfile, "A") : read(matfile, "C")
@@ -33,26 +33,17 @@ atol = 1e-10
 psi = eigmin(Csym) - atol
 
 # -------------------------
-# Calibration parameters
-# -------------------------
-max_calib_iter = 50
-alpha0 = 1e-3
-rho = 1e4
-margin = 1e-5
-tau = 1e-5
-
-# -------------------------
 # Data Collection
 # -------------------------
 solver = "knitro"
 df = DataFrame()
-results_filepath = "results/results_gap_$(solver)_n$(n)_kappa$(kappa).csv"
+results_filepath = "results/proceeding/results_gap_$(solver)_n$(n)_kappa$(kappa).csv"
 results = []
 
 for s in s_vals
     t = s - kappa
     println("--------------------")
-    println("t: $t")
+    println("s = $s  |  t = $t  |  kappa = $kappa")
 
     result = []
     append!(result, [n, s, t])
@@ -92,7 +83,7 @@ for s in s_vals
     # -------------------------
     # Spectral bound
     # -------------------------
-    z_spec = spectral_bound_solver(Csym, t)
+    z_spec = spectral_bound(Csym, t)
 
     append!(
         result,

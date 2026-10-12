@@ -1,0 +1,19 @@
+\begin{table}[htbp]
+\centering
+\begin{tabular}{cc|ccc|ccc}
+\hline
+\multicolumn{2}{c|}{} & \multicolumn{3}{c|}{$\kappa = 6$} & \multicolumn{3}{c}{$\kappa = 8$} \\
+\hline
+$n$ & $s$ & DDGFact & DDGFact+ & GLinx & DDGFact & DDGFact+ & GLinx \\
+\hline
+63 & 10 & 0.0233 & 0.0188 & 11.6 & 0.0208 & 0.0170 & 11.6 \\
+63 & 20 & 0.0528 & 0.0249 & 11.3 & 0.0484 & 0.0268 & 11.9 \\
+63 & 30 & 0.0400 & 0.0255 & 11.7 & 0.0401 & 0.0274 & 10.8 \\
+63 & 40 & 0.0541 & 0.0311 & 11.5 & 0.0525 & 0.0383 & 10.6 \\
+63 & 50 & 0.0632 & 0.0328 & 11.1 & 0.0441 & 0.0281 & 11.6 \\
+63 & 60 & 0.0411 & 0.0114 & 10.2 & 0.0420 & 0.0130 & 10.3 \\
+\hline
+\end{tabular}
+\caption{Runtimes (in seconds) for $n = 63$ and $\kappa \in \{6,8\}$.}
+\label{tab:runtimes_n63_kappa6_8}
+\end{table}

@@ -1,0 +1,21 @@
+\begin{table}[htbp]
+\centering
+\begin{tabular}{cc|ccc|ccc}
+\hline
+\multicolumn{2}{c|}{} & \multicolumn{3}{c|}{$\kappa = 6$} & \multicolumn{3}{c}{$\kappa = 8$} \\
+\hline
+$n$ & $s$ & DDGFact & DDGFact+ & GLinx & DDGFact & DDGFact+ & GLinx \\
+\hline
+90 & 10 & 0.0325 & 0.0264 & 71.2 & 0.0337 & 0.0295 & 57.0 \\
+90 & 20 & 0.0675 & 0.0602 & 68.4 & 0.0890 & 0.0692 & 71.2 \\
+90 & 30 & 0.0653 & 0.0422 & 64.7 & 0.0710 & 0.0457 & 66.7 \\
+90 & 40 & 0.0760 & 0.0559 & 64.4 & 0.0823 & 0.0884 & 66.3 \\
+90 & 50 & 0.0822 & 0.0774 & 67.0 & 0.0682 & 0.0607 & 66.3 \\
+90 & 60 & 0.0671 & 0.0494 & 67.0 & 0.0718 & 0.0578 & 71.8 \\
+90 & 70 & 0.0632 & 0.0449 & 62.6 & 0.0626 & 0.0489 & 63.3 \\
+90 & 80 & 0.0719 & 0.0512 & 63.7 & 0.0683 & 0.0487 & 64.7 \\
+\hline
+\end{tabular}
+\caption{Runtimes (in seconds) for $n = 90$ and $\kappa \in \{6,8\}$.}
+\label{tab:runtimes_n90_kappa6_8}
+\end{table}
