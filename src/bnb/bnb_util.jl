@@ -8,6 +8,7 @@ using Printf
 const DDGFact = :DDGFact
 const DDGFactplus = :DDGFactplus
 const DDGFactplusUpsilon = :DDGFactplusUpsilon
+const TraceBound = :Trace
 
 
 struct GMESPNode
@@ -31,8 +32,8 @@ Base.isless(a::GMESPNode, b::GMESPNode) = a.ub < b.ub
 function _normalize_relaxation(relaxation)
     r = relaxation isa Symbol ? relaxation : Symbol(relaxation)
 
-    if r ∉ (:DDGFact, :DDGFactplus, :DDGFactplusUpsilon)
-        error("relaxation must be one of DDGFact, DDGFactplus, or DDGFactplusUpsilon.")
+    if r ∉ (:DDGFact, :DDGFactplus, :DDGFactplusUpsilon, :Trace)
+        error("Unknown relaxation: $r")
     end
 
     return r
@@ -92,6 +93,10 @@ function _validate_bnb_options(
 
     if upsilon_fixing ∉ (:simple, :strong)
         error("upsilon_fixing must be either :simple or :strong.")
+    end
+
+    if relaxation == :Trace && fixing_rule != :none
+        error("Trace relaxation requires fixing_rule = :none.")
     end
 
     _normalize_calibration_method(calibration_method)
@@ -174,6 +179,22 @@ end
 
 
 function _branch_var(C::Symmetric, keep::Vector{Int}, x::Vector{Float64}, F1::Vector{Int}, relaxation::Symbol)
+    if relaxation == :Trace
+        best_i = 0
+        best_d = -Inf
+
+        for i in keep
+            i in F1 && continue
+
+            if C[i, i] > best_d
+                best_d = C[i, i]
+                best_i = i
+            end
+        end
+
+        return best_i
+    end
+
     F1set = Set(F1)
 
     if relaxation == :DDGFactplus && _is_integer_point(x)
@@ -574,7 +595,7 @@ end
 
 function _determined_node(
     C::Symmetric,
-    Ck::Symmetric,
+    Ck::Union{Nothing,Symmetric},
     s::Int,
     t::Int,
     keep::Vector{Int},
@@ -590,7 +611,33 @@ function _determined_node(
     upsilon_fixing::Symbol,
     fixed_gamma::Union{Nothing,Vector{Float64}} = nothing,
 )
-    if relaxation == :DDGFact
+    if relaxation == :Trace
+        S = sort(keep[findall(>(0.5), x)])
+
+        bound_time = @elapsed begin
+            ub = _gmesp_obj(C, S, t)
+        end
+
+        _add_bnb_timing!(:bound_computation_time, bound_time)
+
+        return (
+            ub = ub,
+            x = x,
+            y = Float64[],
+            keep = keep,
+            determined = true,
+            relaxation = relaxation,
+            dual_solution = nothing,
+            l = Float64[],
+            c = Float64[],
+            gamma = nothing,
+            psi = psi,
+            F = nothing,
+            primal_obj = ub,
+            upsilon_fixing = upsilon_fixing,
+        )
+
+    elseif relaxation == :DDGFact
         local ub_node
 
         bound_time = @elapsed begin
@@ -1039,6 +1086,7 @@ function _gmesp_node(
     psi::Union{Nothing,Float64} = nothing,
     plus_cf::Bool = false,
     psi_trace::Union{Nothing,Float64} = nothing,
+    diagonal_order::Union{Nothing,Vector{Int}} = nothing,
     calibration_method::Symbol = :bfgs,
     calibration_params = Dict{Symbol,Any}(),
     atol::Float64 = 1e-8,
@@ -1057,7 +1105,7 @@ function _gmesp_node(
     local n_red
     local infeasible_intersection
     local infeasible_size
-    local Ck
+    local Ck = nothing
 
     setup_time = @elapsed begin
         n = size(C, 1)
@@ -1067,7 +1115,7 @@ function _gmesp_node(
         infeasible_intersection = !isempty(intersect(F1, F0))
         infeasible_size = length(F1) > s || s > n_red
 
-        if !(infeasible_intersection || infeasible_size)
+        if !(infeasible_intersection || infeasible_size) && relaxation != :Trace
             Ck = Symmetric(Matrix(C[keep, keep]))
         end
     end
@@ -1108,6 +1156,44 @@ function _gmesp_node(
             psi_floor = psi_floor,
             upsilon_fixing = upsilon_fixing,
             fixed_gamma = fixed_gamma,
+        )
+    end
+
+    if relaxation == :Trace
+        psi === nothing && error("Trace relaxation requires psi.")
+
+        diagonal_order === nothing &&
+            error("Trace relaxation requires diagonal_order.")
+
+        bound_time = @elapsed begin
+            ub = trace_upper_bound_sorted(
+                C,
+                s,
+                t,
+                psi,
+                diagonal_order;
+                F1 = F1,
+                F0 = F0,
+            )
+        end
+
+        _add_bnb_timing!(:bound_computation_time, bound_time)
+
+        return (
+            ub = ub,
+            x = Float64[],
+            y = Float64[],
+            keep = keep,
+            determined = false,
+            relaxation = relaxation,
+            dual_solution = nothing,
+            l = Float64[],
+            c = Float64[],
+            gamma = nothing,
+            psi = psi,
+            F = nothing,
+            primal_obj = NaN,
+            upsilon_fixing = upsilon_fixing,
         )
     end
 

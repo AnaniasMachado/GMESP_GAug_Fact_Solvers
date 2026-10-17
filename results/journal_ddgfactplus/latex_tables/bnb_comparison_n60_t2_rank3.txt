@@ -1,0 +1,20 @@
+\begin{table}[htbp]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{c|ccc|cccc|cccccc}
+\hline
+$s$ & \multicolumn{3}{c|}{$\mathrm{Trace}$} & \multicolumn{4}{c|}{$\mathrm{DDGFact}^{+}$} & \multicolumn{6}{c}{$\mathrm{DDGFact}^{+}\text{ (CF)}$} \\
+\hline
+ & Gap & Nodes & Time & Gap & Nodes & Fixed & Time & Gap & Nodes & Fixed & Time & CF & Prunes \\
+\hline
+5 & 0.000 & 1247 & 0.1 & 0.000 & 720 & 666 & 4.6 & 0.000 & 705 & 459 & 3.2 & 115 & 8 \\
+10 & 0.000 & 484157 & 7.5 & 0.000 & 373700 & 127410 & 1218.6 & 0.000 & 373110 & 87146 & 673.1 & 102334 & 1121 \\
+15 & 0.000 & 144505093 & 3405.1 & 0.084 & 1365777 & 146604 & 7200.3 & 0.065 & 4403083 & 311982 & 7200.3 & 1935268 & 0 \\
+20 & 0.089 & 204111095 & 7201.1 & 0.151 & 1291655 & 0 & 7200.4 & 0.130 & 8517979 & 0 & 7200.4 & 4447681 & 0 \\
+25 & 0.144 & 151375211 & 7202.9 & 0.189 & 1182755 & 0 & 7200.7 & 0.170 & 10142621 & 0 & 7200.7 & 5821629 & 0 \\
+\hline
+\end{tabular}
+}
+\caption{Placeholder caption.}
+\label{tab:bnb_comparison_n60_t2_rank3}
+\end{table}

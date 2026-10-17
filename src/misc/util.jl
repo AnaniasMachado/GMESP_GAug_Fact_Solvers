@@ -460,6 +460,43 @@ function trace_upper_bound(C::Symmetric{<:Real,<:AbstractMatrix}, s::Int, t::Int
     return t * log(trM / t + psi)
 end
 
+function trace_upper_bound_sorted(
+    C::Symmetric{<:Real,<:AbstractMatrix},
+    s::Int,
+    t::Int,
+    psi::Float64,
+    diagonal_order::Vector{Int};
+    F1::Vector{Int} = Int[],
+    F0::Vector{Int} = Int[],
+)
+    n = size(C, 1)
+    m = s - length(F1)
+
+    0 <= m <= n - length(F1) - length(F0) || return -Inf
+
+    trM = -s * psi
+
+    for i in F1
+        trM += C[i, i]
+    end
+
+    selected = 0
+
+    if m > 0
+        for i in diagonal_order
+            i in F1 && continue
+            i in F0 && continue
+
+            trM += C[i, i]
+            selected += 1
+
+            selected == m && break
+        end
+    end
+
+    return t * log(trM / t + psi)
+end
+
 # ============================================================
 # Spectral subgradient of Gamma_t at M
 # ============================================================

@@ -91,6 +91,7 @@ function _make_node_kwargs(;
     psi,
     plus_cf,
     psi_trace,
+    diagonal_order,
     calibration_method,
     calibration_params,
     atol,
@@ -104,6 +105,7 @@ function _make_node_kwargs(;
         psi = psi,
         plus_cf = plus_cf,
         psi_trace = psi_trace,
+        diagonal_order = diagonal_order,
         calibration_method = calibration_method,
         calibration_params = calibration_params,
         atol = atol,
@@ -158,6 +160,39 @@ function _bound_child!(
     recalibrate_k::Int,
 )
     child_depth = parent.depth + 1
+
+    if node_kwargs.relaxation == :Trace
+        r = _gmesp_node(
+            C,
+            s,
+            t,
+            F1,
+            F0;
+            node_kwargs...,
+        )
+
+        cnt = counters[]
+        counters[] = (
+            nodes = cnt.nodes + 1,
+            nfix0 = cnt.nfix0,
+            nfix1 = cnt.nfix1,
+        )
+
+        _register_integer_solution!(C, s, t, r, state)
+
+        st = state[]
+
+        _push_if_survives!(
+            open,
+            F1,
+            F0,
+            r,
+            st.lb,
+            child_depth,
+        )
+
+        return nothing
+    end
 
     if node_kwargs.relaxation == :DDGFactplus
         psi_trace = node_kwargs.psi_trace
@@ -424,36 +459,12 @@ end
 # Main solver
 # =============================================================================
 
-"""
-    solve_bnb_ddfact(
-        C, s, t;
-        relaxation = DDGFact,
-        fixing_rule = :dual,
-        calibration_method = :bfgs,
-        root_calibration_params = Dict{Symbol,Any}(),
-        node_calibration_params = Dict{Symbol,Any}(),
-        ...
-    )
-
-General branch-and-bound for GMESP.
-
-Main options:
-
-  - `relaxation = DDGFact`, `DDGFactplus`, or `DDGFactplusUpsilon`.
-  - `fixing_rule = :none`, `:dual`, `:primal`, or `:both`.
-  - `calibration_method = :bfgs`, `:ppa_one`, `:ppa_full`,
-        `:pf_lmo_lmo`, `:pf_lmo_po`, or `:pf_po_lmo` for DDGFactplusUpsilon.
-  - `root_calibration_params` controls root-node Upsilon calibration.
-  - `node_calibration_params` controls all child and rebound node calibrations.
-
-For `DDGFact`, only `fixing_rule = :none` and `fixing_rule = :dual` are supported.
-"""
 function solve_bnb_ddfact(
     C::Symmetric,
     s::Int,
     t::Int;
     relaxation = DDGFact,
-    fixing_rule::Symbol = :dual,
+    fixing_rule::Symbol = relaxation == :Trace ? :none : :dual,
     psi::Union{Nothing,Float64} = nothing,
     plus_cf::Bool = false,
     time_limit::Real = 3600.0,
@@ -502,6 +513,18 @@ function solve_bnb_ddfact(
         nfix1 = 0,
     ))
 
+    diagonal_order = nothing
+
+    if relaxation == :Trace
+        lambda_min_C = eigmin(C)
+        psi = psi === nothing ? max(0.0, lambda_min_C - atol) : psi
+
+        0.0 <= psi <= lambda_min_C ||
+            error("Trace relaxation requires 0 ≤ psi ≤ λmin(C).")
+
+        diagonal_order = sortperm(diag(C); rev = true)
+    end
+
     psi_trace = relaxation == :DDGFactplus ? (psi === nothing ? _default_psi(C; psi_margin, psi_floor) : psi) : nothing
 
     root_node_kwargs = _make_node_kwargs(
@@ -509,6 +532,7 @@ function solve_bnb_ddfact(
         psi = psi,
         plus_cf = plus_cf,
         psi_trace = psi_trace,
+        diagonal_order = diagonal_order,
         calibration_method = calibration_method,
         calibration_params = root_calibration_params,
         atol = atol,
@@ -523,6 +547,7 @@ function solve_bnb_ddfact(
         psi = psi,
         plus_cf = plus_cf,
         psi_trace = psi_trace,
+        diagonal_order = diagonal_order,
         calibration_method = calibration_method,
         calibration_params = node_calibration_params,
         atol = atol,
